@@ -7,4 +7,6 @@ target/
 
 .direnv
 .envrc
+result
+
 rust_out
