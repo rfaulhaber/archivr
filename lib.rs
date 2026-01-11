@@ -1,3 +1,7 @@
-pub fn add(left: i32, right: i32) -> i32 {
-    left + right
+use clap::Parser;
+
+#[derive(Debug, Parser)]
+#[command(name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
+pub struct Args {
+    blog_name: String,
 }
