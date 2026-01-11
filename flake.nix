@@ -1,5 +1,5 @@
 {
-  description = "Rust flake template using rust-overlay and flake-parts.";
+  description = "A Tumblr backup tool.";
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
@@ -15,7 +15,7 @@
     flake-parts,
     ...
   }: let
-    projectName = "CHANGEME";
+    projectName = "archivr";
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [];
@@ -40,6 +40,10 @@
           overlays = [
             self.overlays.rustOverlay
           ];
+          config.allowUnfreePredicate = pkg:
+            builtins.elem (pkgs.lib.getName pkg) [
+              "claude-code"
+            ];
         };
 
         formatter = pkgs.alejandra;
@@ -60,6 +64,8 @@
             clippy
             rust-analyzer
             cargo-nextest
+
+            claude-code
           ];
         };
       };
