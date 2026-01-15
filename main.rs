@@ -1,9 +1,29 @@
-use archivr::Args;
-use camino::Utf8Path;
+use archivr::{ArchivrError, Args, Config, auth::Auth};
 use clap::Parser;
+use crabrave::Crabrave;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Load config file if specified
+    let config: Option<Config> = if let Some(ref config_path) = args.config_file {
+        let config_file_str = fs_err::read_to_string(config_path)?;
+        Some(serde_json::from_str(&config_file_str)?)
+    } else {
+        None
+    };
+
+    // CLI args take precedence over config file
+    let consumer_key = args
+        .consumer_key
+        .or_else(|| config.as_ref().and_then(|c| c.consumer_key.clone()))
+        .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
+
+    let consumer_secret = args
+        .consumer_secret
+        .or_else(|| config.as_ref().and_then(|c| c.consumer_secret.clone()))
+        .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
 
     // check if we are already authenticated
     // check if consumer key and secret are specified
@@ -22,9 +42,72 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(data_dir)?;
     }
 
-    let auth_file_exists = fs_err::exists(data_dir.join("auth.json"))?;
+    let auth_file_path = data_dir.join("auth.json");
 
-    if !auth_file_exists {}
+    let auth_file_exists = fs_err::exists(auth_file_path.clone())?;
+
+    let client = if auth_file_exists {
+        let auth_str = fs_err::read_to_string(auth_file_path)?;
+        let auth: Auth = serde_json::from_str(&auth_str)?;
+
+        Crabrave::builder()
+            .consumer_key(consumer_key)
+            .consumer_secret(consumer_secret)
+            .access_token(auth.access_token)
+            .build()?
+    } else {
+        let oauth_config = crabrave::oauth::OAuth2Config::new(
+            consumer_key.clone(),
+            consumer_secret.clone(),
+            format!(
+                "http://localhost:{}/redirect",
+                archivr::DEFAULT_CALLBACK_PORT
+            ),
+        );
+
+        let auth_url = oauth_config.authorize_url().0;
+
+        match open::that(auth_url) {
+            Ok(_) => {
+                println!("Opening Tumblr to complete OAuth...");
+            }
+            Err(e) => {
+                // println!("Could not open browser. Please navigate to this URL and paste the code you get back below: a")
+                todo!("Manually have user paste in code");
+            }
+        }
+
+        let auth_code = archivr::capture_callback().await?;
+        let oauth2_token = oauth_config.exchange_code(auth_code).await?;
+
+        let auth = Auth {
+            access_token: oauth2_token.access_token.clone(),
+            refresh_token: oauth2_token.refresh_token,
+        };
+
+        let _ = fs_err::write(auth_file_path, serde_json::to_string(&auth)?)?;
+
+        Crabrave::builder()
+            .consumer_key(consumer_key)
+            .consumer_secret(consumer_secret)
+            .access_token(&oauth2_token.access_token)
+            .build()?
+    };
+
+    let blog_name = args.blog_name;
+
+    let post_count = client
+        .blogs(blog_name.clone())
+        .info()
+        .await?
+        .blog
+        .total_posts;
+
+    let archive_path = std::env::current_dir()?.join(&blog_name);
+
+    let _ = fs_err::create_dir(archive_path)?;
+
+    let posts = client.blogs(blog_name.clone()).posts().send().await?;
 
     Ok(())
 }

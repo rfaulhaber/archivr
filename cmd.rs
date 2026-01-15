@@ -4,14 +4,20 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
-    blog_name: String,
+    pub blog_name: String,
 
     #[arg(long, help = "Tumblr OAuth consumer key")]
-    consumer_key: Option<String>,
+    pub consumer_key: Option<String>,
 
     #[arg(long, help = "Tumblr OAuth consumer secret")]
-    consumer_secret: Option<String>,
+    pub consumer_secret: Option<String>,
 
     #[arg(long, help = "Job config file")]
-    config_file: Option<Utf8PathBuf>,
+    pub config_file: Option<Utf8PathBuf>,
+
+    #[arg(
+        long,
+        help = "Resume last job, if applicable. Exits with error if no job in progress was found"
+    )]
+    pub resume: bool,
 }

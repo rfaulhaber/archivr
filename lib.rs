@@ -1,9 +1,10 @@
+pub mod auth;
 pub mod cmd;
+pub mod config;
 
 pub use cmd::Args;
+pub use config::Config;
 
-use camino::Utf8PathBuf;
-use clap::Parser;
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -18,9 +19,11 @@ pub enum ArchivrError {
     MalformedCallback,
     #[error("Error from OAuth: {0}")]
     OAuth(String),
+    #[error("Consumer key and secret not specified")]
+    NoConsumerKeyAndSecret,
 }
 
-async fn capture_callback() -> anyhow::Result<String> {
+pub async fn capture_callback() -> anyhow::Result<String> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_CALLBACK_PORT)).await?;
 
     let (mut stream, _) = listener.accept().await?;
