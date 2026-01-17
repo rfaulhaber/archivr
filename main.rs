@@ -96,18 +96,40 @@ async fn main() -> anyhow::Result<()> {
 
     let blog_name = args.blog_name;
 
-    let post_count = client
-        .blogs(blog_name.clone())
-        .info()
-        .await?
-        .blog
-        .total_posts;
-
     let archive_path = std::env::current_dir()?.join(&blog_name);
 
-    let _ = fs_err::create_dir(archive_path)?;
+    if !fs_err::exists(&archive_path)? {
+        let _ = fs_err::create_dir(archive_path)?;
+    }
 
-    let posts = client.blogs(blog_name.clone()).posts().send().await?;
+    let mut post_response = client.blogs(blog_name.clone()).posts().send().await?;
+
+    let post_count = post_response.total_posts;
+    let mut post_offset: usize = 0;
+
+    loop {
+        println!(
+            "({}/{}) Fetching next batch of posts...",
+            post_offset, post_count
+        );
+
+        post_offset += post_response.posts.len();
+
+        for post in post_response.posts {
+            println!("processing post {}", post.id);
+        }
+
+        post_response = client
+            .blogs(blog_name.clone())
+            .posts()
+            .offset(post_offset.try_into().unwrap())
+            .send()
+            .await?;
+
+        if post_offset > post_count.try_into().unwrap() {
+            break;
+        }
+    }
 
     Ok(())
 }
