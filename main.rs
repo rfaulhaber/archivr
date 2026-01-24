@@ -1,10 +1,15 @@
-use archivr::{ArchivrError, Args, Config, auth::Auth};
+use archivr::{ArchivrError, Args, Config, PostRenderer, auth::Auth};
+use camino::Utf8PathBuf;
 use clap::Parser;
 use crabrave::Crabrave;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let args = Args::parse();
+
+    log::debug!("args: {:?}", args);
 
     // Load config file if specified
     let config: Option<Config> = if let Some(ref config_path) = args.config_file {
@@ -96,11 +101,18 @@ async fn main() -> anyhow::Result<()> {
 
     let blog_name = args.blog_name;
 
-    let archive_path = std::env::current_dir()?.join(&blog_name);
+    let archive_path = Utf8PathBuf::try_from(std::env::current_dir()?)?.join(&blog_name);
 
     if !fs_err::exists(&archive_path)? {
-        let _ = fs_err::create_dir(archive_path)?;
+        fs_err::create_dir(&archive_path)?;
     }
+
+    // Set up the template renderer
+    let renderer = if let Some(ref template_path) = args.template {
+        PostRenderer::from_file(template_path)?
+    } else {
+        PostRenderer::new()
+    };
 
     let mut post_response = client.blogs(blog_name.clone()).posts().send().await?;
 
@@ -115,8 +127,25 @@ async fn main() -> anyhow::Result<()> {
 
         post_offset += post_response.posts.len();
 
-        for post in post_response.posts {
-            println!("processing post {}", post.id);
+        for post in &post_response.posts {
+            log::info!("processing post {}", post.id);
+
+            // Render the post using the template
+            let rendered = renderer.render(post)?;
+
+            // Determine output path
+            let output_file = if args.directories {
+                let post_dir = archive_path.join(&post.id);
+                if !fs_err::exists(&post_dir)? {
+                    fs_err::create_dir(&post_dir)?;
+                }
+                post_dir.join("index.html")
+            } else {
+                archive_path.join(format!("{}.html", post.id))
+            };
+
+            fs_err::write(&output_file, &rendered)?;
+            log::debug!("saved post {} to {}", post.id, output_file);
         }
 
         post_response = client

@@ -32,8 +32,11 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 - `lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `cmd.rs` - CLI argument definitions using clap derive
 - `config.rs` - Configuration file deserialization
+- `auth.rs` - Authentication token storage structure
 
-The OAuth flow uses a local TCP server on port 6263 to capture the callback.
+The OAuth flow uses a local TCP server on port 6263 to capture the callback. Authentication tokens are persisted to `{data_local_dir}/archivr/auth.json` using the `directories` crate.
+
+The `crabrave` library handles Tumblr API interactions.
 
 ## Strict Linting Rules
 
@@ -50,3 +53,5 @@ This project has aggressive clippy rules (`Cargo.toml` + `clippy.toml`):
 - `std::fs::*` → `fs_err::*` (for better error messages)
 - `std::sync::Mutex/RwLock` → `parking_lot::*`
 - `std::net::TcpStream` → `tokio::net::TcpStream`
+
+**Unused variables:** Prefix with underscore (e.g., `_e`) to silence warnings.

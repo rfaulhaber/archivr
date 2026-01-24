@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod cmd;
 pub mod config;
+pub mod template;
 
 pub use cmd::Args;
 pub use config::Config;
+pub use template::{PostRenderer, DEFAULT_TEMPLATE};
 
 use thiserror::Error;
 use tokio::{
