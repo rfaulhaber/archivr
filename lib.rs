@@ -1,10 +1,12 @@
 pub mod auth;
 pub mod cmd;
 pub mod config;
+pub mod job;
 pub mod template;
 
 pub use cmd::Args;
-pub use config::Config;
+pub use config::{Config, ResolvedConfig};
+pub use job::{JobState, LastRun};
 pub use template::{PostRenderer, DEFAULT_TEMPLATE};
 
 use thiserror::Error;
@@ -23,21 +25,23 @@ pub enum ArchivrError {
     OAuth(String),
     #[error("Consumer key and secret not specified")]
     NoConsumerKeyAndSecret,
+    #[error("CSRF state mismatch: expected {expected}, got {actual}")]
+    CsrfMismatch { expected: String, actual: String },
 }
 
-pub async fn capture_callback() -> anyhow::Result<String> {
+pub async fn capture_callback() -> anyhow::Result<(String, Option<String>)> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_CALLBACK_PORT)).await?;
 
     let (mut stream, _) = listener.accept().await?;
     let (reader, mut writer) = stream.split();
     let mut reader = BufReader::new(reader);
 
-    // Read the request line: GET /callback?code=xyz HTTP/1.1
+    // Read the request line: GET /callback?code=xyz&state=abc HTTP/1.1
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
 
-    // Extract the code from the query string
-    let code = parse_code_from_request(&request_line)?;
+    // Extract the code and state from the query string
+    let code_and_state = parse_code_from_request(&request_line)?;
 
     // Send a minimal response
     let body = "<h1>Success!</h1><p>You can close this tab.</p>";
@@ -48,10 +52,10 @@ pub async fn capture_callback() -> anyhow::Result<String> {
     );
     writer.write_all(response.as_bytes()).await?;
 
-    Ok(code)
+    Ok(code_and_state)
 }
 
-fn parse_code_from_request(request_line: &str) -> anyhow::Result<String> {
+fn parse_code_from_request(request_line: &str) -> anyhow::Result<(String, Option<String>)> {
     let path = request_line
         .split_whitespace()
         .nth(1)
@@ -59,16 +63,24 @@ fn parse_code_from_request(request_line: &str) -> anyhow::Result<String> {
 
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
 
+    let mut code: Option<String> = None;
+    let mut state: Option<String> = None;
+
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
-            if key == "code" {
-                return Ok(urlencoding::decode(value)?.into_owned());
-            }
-            if key == "error" {
-                return Err(ArchivrError::OAuth(urlencoding::decode(value)?.into_owned()).into());
+            match key {
+                "code" => code = Some(urlencoding::decode(value)?.into_owned()),
+                "state" => state = Some(urlencoding::decode(value)?.into_owned()),
+                "error" => {
+                    return Err(
+                        ArchivrError::OAuth(urlencoding::decode(value)?.into_owned()).into(),
+                    );
+                }
+                _ => {}
             }
         }
     }
 
-    Err(ArchivrError::MalformedCallback.into())
+    let code = code.ok_or(ArchivrError::MalformedCallback)?;
+    Ok((code, state))
 }

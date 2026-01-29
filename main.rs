@@ -1,167 +1,181 @@
-use archivr::{ArchivrError, Args, Config, PostRenderer, auth::Auth};
-use camino::Utf8PathBuf;
+use std::io::Write;
+
+use archivr::{Args, JobState, LastRun, PostRenderer, ResolvedConfig, auth::authenticate};
 use clap::Parser;
 use crabrave::Crabrave;
 
-const PROJECT_QUALIFIER: &'static str = "com.ryanfaulhaber";
-const PROJECT_NAME: &'static str = "archivr";
+const PROJECT_QUALIFIER: &str = "com.ryanfaulhaber";
+const PROJECT_NAME: &str = "archivr";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let args = Args::parse();
-
     log::debug!("args: {:?}", args);
 
-    // Load config file if specified
-    let config: Option<Config> = if let Some(ref config_path) = args.config_file {
-        let config_file_str = fs_err::read_to_string(config_path)?;
-        Some(serde_json::from_str(&config_file_str)?)
-    } else {
-        None
-    };
-
-    // CLI args take precedence over config file
-    let consumer_key = args
-        .consumer_key
-        .or_else(|| config.as_ref().and_then(|c| c.consumer_key.clone()))
-        .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
-
-    let consumer_secret = args
-        .consumer_secret
-        .or_else(|| config.as_ref().and_then(|c| c.consumer_secret.clone()))
-        .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
-
-    // check if we are already authenticated
-    // check if consumer key and secret are specified
-    // check config file for extra settings
-    // if not authenticated, go through authentication flow
-    // if authenticated, proceed with backup
+    let config = ResolvedConfig::from_args(args)?;
 
     let project_dir = directories::ProjectDirs::from(PROJECT_QUALIFIER, "", PROJECT_NAME)
         .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?;
+    let data_dir = camino::Utf8Path::from_path(project_dir.data_local_dir())
+        .ok_or_else(|| anyhow::anyhow!("Data directory path is not valid UTF-8"))?;
 
-    let data_dir = project_dir.data_local_dir();
+    let client =
+        authenticate(&config.consumer_key, &config.consumer_secret, data_dir, config.reauth)
+            .await?;
 
-    let data_dir_exists = fs_err::exists(data_dir)?;
-
-    if !data_dir_exists {
-        std::fs::create_dir_all(data_dir)?;
+    if !fs_err::exists(&config.output_dir)? {
+        fs_err::create_dir_all(&config.output_dir)?;
     }
 
-    let auth_file_path = data_dir.join("auth.json");
-
-    let auth_file_exists = fs_err::exists(auth_file_path.clone())?;
-
-    let client = if auth_file_exists {
-        let auth_str = fs_err::read_to_string(auth_file_path)?;
-        let auth: Auth = serde_json::from_str(&auth_str)?;
-
-        Crabrave::builder()
-            .consumer_key(consumer_key)
-            .consumer_secret(consumer_secret)
-            .access_token(auth.access_token)
-            .build()?
-    } else {
-        let oauth_config = crabrave::oauth::OAuth2Config::new(
-            consumer_key.clone(),
-            consumer_secret.clone(),
-            format!(
-                "http://localhost:{}/redirect",
-                archivr::DEFAULT_CALLBACK_PORT
-            ),
-        );
-
-        let auth_url = oauth_config.authorize_url().0;
-
-        match open::that(auth_url) {
-            Ok(_) => {
-                println!("Opening Tumblr to complete OAuth...");
-            }
-            Err(e) => {
-                // println!("Could not open browser. Please navigate to this URL and paste the code you get back below: a")
-                todo!("Manually have user paste in code");
-            }
-        }
-
-        let auth_code = archivr::capture_callback().await?;
-        let oauth2_token = oauth_config.exchange_code(auth_code).await?;
-
-        let auth = Auth {
-            access_token: oauth2_token.access_token.clone(),
-            refresh_token: oauth2_token.refresh_token,
-        };
-
-        let _ = fs_err::write(auth_file_path, serde_json::to_string(&auth)?)?;
-
-        Crabrave::builder()
-            .consumer_key(consumer_key)
-            .consumer_secret(consumer_secret)
-            .access_token(&oauth2_token.access_token)
-            .build()?
-    };
-
-    let blog_name = args.blog_name;
-
-    let archive_path = Utf8PathBuf::try_from(std::env::current_dir()?)?.join(&blog_name);
-
-    if !fs_err::exists(&archive_path)? {
-        fs_err::create_dir(&archive_path)?;
-    }
-
-    // Set up the template renderer
-    let renderer = if let Some(ref template_path) = args.template {
+    let renderer = if let Some(ref template_path) = config.template_path {
         PostRenderer::from_file(template_path)?
     } else {
         PostRenderer::new()
     };
 
-    let mut post_response = client.blogs(blog_name.clone()).posts().send().await?;
+    let job_file = JobState::job_file_path(&config.output_dir);
+    let mut job = if config.resume {
+        JobState::load(&job_file)?
+    } else {
+        JobState::new(&config.blog_name)
+    };
 
-    let post_count = post_response.total_posts;
-    let mut post_offset: usize = 0;
+    let marker_file = LastRun::marker_path(&config.output_dir);
+    let incremental_cutoff = if config.incremental {
+        match LastRun::load(&marker_file) {
+            Ok(last_run) => Some(last_run.newest_post_timestamp),
+            Err(_e) => {
+                log::info!("no previous run marker found, performing full backup");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    if !config.quiet {
+        if config.incremental {
+            writeln!(
+                std::io::stdout(),
+                "Backing up {} (incremental)...",
+                config.blog_name
+            )?;
+        } else {
+            writeln!(std::io::stdout(), "Backing up {}...", config.blog_name)?;
+        }
+    }
+
+    let newest_timestamp =
+        run_backup(&client, &config, &renderer, &mut job, &job_file, incremental_cutoff).await?;
+
+    if fs_err::exists(&job_file)? {
+        JobState::delete(&job_file)?;
+    }
+
+    if let Some(ts) = newest_timestamp {
+        let last_run = LastRun::new(&config.blog_name, ts);
+        last_run.save(&marker_file)?;
+    }
+
+    if !config.quiet {
+        writeln!(std::io::stdout(), "Backup complete.")?;
+    }
+
+    Ok(())
+}
+
+async fn run_backup(
+    client: &Crabrave,
+    config: &ResolvedConfig,
+    renderer: &PostRenderer<'_>,
+    job: &mut JobState,
+    job_file: &camino::Utf8Path,
+    incremental_cutoff: Option<i64>,
+) -> anyhow::Result<Option<i64>> {
+    let mut newest_timestamp: Option<i64> = None;
+    let mut posts_archived: u64 = 0;
 
     loop {
-        println!(
+        let post_response = client
+            .blogs(config.blog_name.clone())
+            .posts()
+            .offset(job.offset)
+            .send()
+            .await?;
+
+        if job.total_posts.is_none() {
+            job.total_posts = Some(post_response.total_posts);
+        }
+        let total_posts = job.total_posts.unwrap_or(0);
+
+        log::info!(
             "({}/{}) Fetching next batch of posts...",
-            post_offset, post_count
+            job.offset,
+            total_posts
         );
 
-        post_offset += post_response.posts.len();
+        let mut reached_cutoff = false;
 
         for post in &post_response.posts {
+            if let Some(cutoff) = incremental_cutoff
+                && post.timestamp <= cutoff
+            {
+                log::info!(
+                    "reached incremental cutoff at post {} (timestamp {})",
+                    post.id,
+                    post.timestamp
+                );
+                reached_cutoff = true;
+                break;
+            }
+
+            newest_timestamp = Some(match newest_timestamp {
+                Some(current) if post.timestamp > current => post.timestamp,
+                Some(current) => current,
+                None => post.timestamp,
+            });
+
             log::info!("processing post {}", post.id);
 
-            // Render the post using the template
             let rendered = renderer.render(post)?;
 
-            // Determine output path
-            let output_file = if args.directories {
-                let post_dir = archive_path.join(&post.id);
+            let output_file = if config.directories {
+                let post_dir = config.output_dir.join(&post.id);
                 if !fs_err::exists(&post_dir)? {
                     fs_err::create_dir(&post_dir)?;
                 }
                 post_dir.join("index.html")
             } else {
-                archive_path.join(format!("{}.html", post.id))
+                config.output_dir.join(format!("{}.html", post.id))
             };
 
             fs_err::write(&output_file, &rendered)?;
             log::debug!("saved post {} to {}", post.id, output_file);
+            posts_archived += 1;
         }
 
-        post_response = client
-            .blogs(blog_name.clone())
-            .posts()
-            .offset(post_offset.try_into().unwrap())
-            .send()
-            .await?;
+        job.offset += post_response.posts.len() as u64;
+        job.save(job_file)?;
 
-        if post_offset > post_count.try_into().unwrap() {
+        if !config.quiet {
+            if incremental_cutoff.is_some() {
+                writeln!(std::io::stdout(), "  {} new posts archived", posts_archived)?;
+            } else {
+                writeln!(
+                    std::io::stdout(),
+                    "  {}/{} posts archived",
+                    job.offset,
+                    total_posts
+                )?;
+            }
+        }
+
+        if reached_cutoff || job.offset >= total_posts {
             break;
         }
     }
 
-    Ok(())
+    Ok(newest_timestamp)
 }

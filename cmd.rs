@@ -60,9 +60,21 @@ pub struct Args {
     )]
     pub include_tags: Option<Vec<String>>,
 
-    #[arg(long, help = "Retrieve all posts before this date.")]
+    #[arg(long, help = "Retrieve all posts before this date")]
     pub before: Option<String>, // TODO make date
 
-    #[arg(long, help = "Retrieve all posts after this date.")]
+    #[arg(long, help = "Retrieve all posts after this date")]
     pub after: Option<String>, // TODO make date
+
+    #[arg(short, long, help = "Suppress progress output")]
+    pub quiet: bool,
+
+    #[arg(
+        long,
+        help = "Only fetches all new posts since last run based on the destination directory. If a job has never been run, this flag functionally has no effect"
+    )]
+    pub incremental: bool,
+
+    #[arg(long, help = "Force re-authentication, ignoring any saved tokens")]
+    pub reauth: bool,
 }
