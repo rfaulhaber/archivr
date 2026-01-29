@@ -28,6 +28,8 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 
 ## Code Architecture
 
+There is no `src/` directory in this project. All the Rust source files start at the top level.
+
 - `main.rs` - CLI entry point, argument parsing, authentication flow orchestration
 - `lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `cmd.rs` - CLI argument definitions using clap derive

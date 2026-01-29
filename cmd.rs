@@ -21,7 +21,11 @@ pub struct Args {
     )]
     pub resume: bool,
 
-    #[arg(short, long, help = "Jinja template for formatting Tumblr posts")]
+    #[arg(
+        short,
+        long,
+        help = "Jinja template for formatting Tumblr posts. Exclusive to the --json flag"
+    )]
     pub template: Option<Utf8PathBuf>,
 
     #[arg(short, long, help = "Use directories for each post")]
@@ -49,6 +53,16 @@ pub struct Args {
     )]
     pub output_dir: Option<Utf8PathBuf>,
 
-    #[arg(long, value_delimiter = ',', help = "List of tags to filter for")]
-    pub tags: Option<Vec<String>>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "If set, will only back up posts that include these tags. Must be comma-separated without spaces, e.g. foo,bar,baz"
+    )]
+    pub include_tags: Option<Vec<String>>,
+
+    #[arg(long, help = "Retrieve all posts before this date.")]
+    pub before: Option<String>, // TODO make date
+
+    #[arg(long, help = "Retrieve all posts after this date.")]
+    pub after: Option<String>, // TODO make date
 }

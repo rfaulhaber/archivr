@@ -3,6 +3,9 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 use crabrave::Crabrave;
 
+const PROJECT_QUALIFIER: &'static str = "com.ryanfaulhaber";
+const PROJECT_NAME: &'static str = "archivr";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -36,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     // if not authenticated, go through authentication flow
     // if authenticated, proceed with backup
 
-    let project_dir = directories::ProjectDirs::from("com.ryanfaulhaber", "", "archivr")
+    let project_dir = directories::ProjectDirs::from(PROJECT_QUALIFIER, "", PROJECT_NAME)
         .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?;
 
     let data_dir = project_dir.data_local_dir();
