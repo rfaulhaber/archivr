@@ -3,9 +3,9 @@
 //! This module provides the templating infrastructure for formatting Tumblr posts.
 //! Users can provide custom Jinja templates or use the built-in default.
 
-use minijinja::{Environment, Value, context};
-use crabrave::npf::ContentBlock;
 use crabrave::handlers::blog::{Post, TrailItem};
+use crabrave::npf::ContentBlock;
+use minijinja::{Environment, Value, context};
 
 /// Default HTML template for rendering posts
 pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
@@ -40,6 +40,12 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
     .link-block a { font-weight: bold; color: #0066cc; text-decoration: none; }
     .link-block a:hover { text-decoration: underline; }
     .link-block p { margin: 0.5rem 0 0 0; color: #666; }
+    .poll { border: 1px solid #ddd; padding: 1rem; border-radius: 4px; background: #fafafa; }
+    .poll-question { font-weight: bold; margin-bottom: 0.75rem; }
+    .poll-answers { list-style: none; padding: 0; margin: 0; }
+    .poll-answers li { background: #e9e9e9; padding: 0.5rem 0.75rem; margin: 0.3rem 0; border-radius: 3px; }
+    .poll-meta { font-size: 0.85rem; color: #888; margin-top: 0.5rem; }
+    .unsupported-block { color: #999; font-style: italic; }
     figure { margin: 1rem 0; }
     figcaption { font-size: 0.9rem; color: #666; margin-top: 0.5rem; }
   </style>
@@ -94,30 +100,48 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             let class = subtype.as_deref().unwrap_or("");
             format!(r#"<div class="content-block {class}">{text}</div>"#)
         }
-        ContentBlock::Image { media, alt_text, caption, .. } => {
+        ContentBlock::Image {
+            media,
+            alt_text,
+            caption,
+            ..
+        } => {
             let mut html = String::new();
-            for m in media {
-                let alt = alt_text.as_deref().unwrap_or("");
-                let width_attr = m.width.map(|w| format!(r#" width="{w}""#)).unwrap_or_default();
-                html.push_str(&format!(
-                    r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width_attr}>"#,
-                    url = m.url
-                ));
-                if let Some(cap) = caption {
-                    html.push_str(&format!("<figcaption>{cap}</figcaption>"));
-                }
-                html.push_str("</figure>");
+            let m = media.get(0).unwrap();
+            let alt = alt_text.as_deref().unwrap_or("");
+            let width_attr = m
+                .width
+                .map(|w| format!(r#" width="{w}""#))
+                .unwrap_or_default();
+            html.push_str(&format!(
+                r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width_attr}>"#,
+                url = m.url
+            ));
+            if let Some(cap) = caption {
+                html.push_str(&format!("<figcaption>{cap}</figcaption>"));
             }
+            html.push_str("</figure>");
             html
         }
-        ContentBlock::Video { media, url, embed_html, duration, .. } => {
+        ContentBlock::Video {
+            media,
+            url,
+            embed_html,
+            duration,
+            ..
+        } => {
             let mut html = String::from(r#"<div class="content-block video-embed">"#);
             if let Some(embed) = embed_html {
                 html.push_str(embed);
             } else if let Some(media_list) = media {
                 for m in media_list {
-                    let width_attr = m.width.map(|w| format!(r#" width="{w}""#)).unwrap_or_default();
-                    let duration_str = duration.map(|d| format!(" ({}s)", d as i64)).unwrap_or_default();
+                    let width_attr = m
+                        .width
+                        .map(|w| format!(r#" width="{w}""#))
+                        .unwrap_or_default();
+                    let duration_str = duration
+                        .map(|d| format!(" ({}s)", d as i64))
+                        .unwrap_or_default();
                     html.push_str(&format!(
                         r#"<video controls src="{url}"{width_attr}></video>{duration_str}"#,
                         url = m.url
@@ -129,7 +153,15 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             html.push_str("</div>");
             html
         }
-        ContentBlock::Audio { media, url, title, artist, album, embed_html, .. } => {
+        ContentBlock::Audio {
+            media,
+            url,
+            title,
+            artist,
+            album,
+            embed_html,
+            ..
+        } => {
             let mut html = String::from(r#"<div class="content-block audio-embed">"#);
 
             // Audio metadata
@@ -149,17 +181,23 @@ pub fn render_content_block(block: &ContentBlock) -> String {
 
             if let Some(embed) = embed_html {
                 html.push_str(embed);
-            } else if let Some(media_list) = media {
-                for m in media_list {
-                    html.push_str(&format!(r#"<audio controls src="{}"></audio>"#, m.url));
-                }
+            } else if let Some(media_object) = media {
+                html.push_str(&format!(
+                    r#"<audio controls src="{}"></audio>"#,
+                    media_object.url
+                ));
             } else if let Some(audio_url) = url {
                 html.push_str(&format!(r#"<a href="{audio_url}">Audio link</a>"#));
             }
             html.push_str("</div>");
             html
         }
-        ContentBlock::Link { url, title, description, .. } => {
+        ContentBlock::Link {
+            url,
+            title,
+            description,
+            ..
+        } => {
             let display_title = title.as_deref().unwrap_or(url);
             let mut html = format!(
                 r#"<div class="content-block link-block"><a href="{url}">{display_title}</a>"#
@@ -173,6 +211,41 @@ pub fn render_content_block(block: &ContentBlock) -> String {
         ContentBlock::Paywall { text, .. } => {
             let msg = text.as_deref().unwrap_or("Premium content");
             format!(r#"<div class="content-block paywall">{msg}</div>"#)
+        }
+        ContentBlock::Poll {
+            question,
+            answers,
+            settings,
+            ..
+        } => {
+            let mut html = String::from(r#"<div class="content-block poll">"#);
+            html.push_str(&format!(r#"<div class="poll-question">{question}</div>"#));
+            html.push_str(r#"<ul class="poll-answers">"#);
+            for answer in answers {
+                html.push_str(&format!("<li>{}</li>", answer.answer_text));
+            }
+            html.push_str("</ul>");
+            if let Some(s) = settings {
+                let mut meta_parts: Vec<String> = Vec::new();
+                if s.multiple_choice {
+                    meta_parts.push("Multiple choice".to_string());
+                }
+                if let Some(status) = &s.close_status {
+                    meta_parts.push(status.clone());
+                }
+                if !meta_parts.is_empty() {
+                    html.push_str(&format!(
+                        r#"<div class="poll-meta">{}</div>"#,
+                        meta_parts.join(" · ")
+                    ));
+                }
+            }
+            html.push_str("</div>");
+            html
+        }
+        ContentBlock::Unknown | _ => {
+            r#"<div class="content-block unsupported-block">Unsupported block type</div>"#
+                .to_string()
         }
     }
 }
@@ -220,15 +293,27 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 subtype => subtype,
             }
         }
-        ContentBlock::Image { media, alt_text, caption, .. } => {
-            let media_values: Vec<Value> = media.iter().map(|m| {
-                context! {
-                    url => m.url,
-                    width => m.width,
-                    height => m.height,
-                    media_type => m.media_type,
-                }
-            }).collect();
+        ContentBlock::Image {
+            media,
+            alt_text,
+            caption,
+            ..
+        } => {
+            let m = media
+                .iter()
+                .filter(|obj| match obj.has_original_dimensions {
+                    Some(true) => true,
+                    _ => false,
+                })
+                .next()
+                .unwrap_or_else(|| media.get(0).unwrap());
+
+            let media_values = vec![context! {
+                url => m.url,
+                width => m.width,
+                height => m.height,
+                media_type => m.media_type,
+            }];
             context! {
                 type => "image",
                 media => media_values,
@@ -236,17 +321,29 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 caption => caption,
             }
         }
-        ContentBlock::Video { media, url, provider, embed_html, duration, .. } => {
-            let media_values: Vec<Value> = media.as_ref().map(|m| {
-                m.iter().map(|media_obj| {
-                    context! {
-                        url => media_obj.url,
-                        width => media_obj.width,
-                        height => media_obj.height,
-                        media_type => media_obj.media_type,
-                    }
-                }).collect()
-            }).unwrap_or_default();
+        ContentBlock::Video {
+            media,
+            url,
+            provider,
+            embed_html,
+            duration,
+            ..
+        } => {
+            let media_values: Vec<Value> = media
+                .as_ref()
+                .map(|m| {
+                    m.iter()
+                        .map(|media_obj| {
+                            context! {
+                                url => media_obj.url,
+                                width => media_obj.width,
+                                height => media_obj.height,
+                                media_type => media_obj.media_type,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             context! {
                 type => "video",
                 media => media_values,
@@ -256,15 +353,25 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 duration => duration,
             }
         }
-        ContentBlock::Audio { media, url, provider, artist, album, title, embed_html, .. } => {
-            let media_values: Vec<Value> = media.as_ref().map(|m| {
-                m.iter().map(|media_obj| {
+        ContentBlock::Audio {
+            media,
+            url,
+            provider,
+            artist,
+            album,
+            title,
+            embed_html,
+            ..
+        } => {
+            let media_values: Value = media
+                .as_ref()
+                .map(|m| {
                     context! {
-                        url => media_obj.url,
-                        media_type => media_obj.media_type,
+                        url => m.url,
+                        media_type => m.media_type,
                     }
-                }).collect()
-            }).unwrap_or_default();
+                })
+                .unwrap_or_default();
             context! {
                 type => "audio",
                 media => media_values,
@@ -276,7 +383,12 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 embed_html => embed_html,
             }
         }
-        ContentBlock::Link { url, title, description, .. } => {
+        ContentBlock::Link {
+            url,
+            title,
+            description,
+            ..
+        } => {
             context! {
                 type => "link",
                 url => url,
@@ -288,6 +400,46 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
             context! {
                 type => "paywall",
                 text => text,
+            }
+        }
+        ContentBlock::Poll {
+            client_id,
+            question,
+            answers,
+            settings,
+            created_at,
+            timestamp,
+        } => {
+            let answer_values: Vec<Value> = answers
+                .iter()
+                .map(|a| {
+                    context! {
+                        client_id => a.client_id,
+                        answer_text => a.answer_text,
+                    }
+                })
+                .collect();
+            let settings_value = settings.as_ref().map(|s| {
+                context! {
+                    multiple_choice => s.multiple_choice,
+                    close_status => s.close_status,
+                    expire_after => s.expire_after,
+                    source => s.source,
+                }
+            });
+            context! {
+                type => "poll",
+                client_id => client_id,
+                question => question,
+                answers => answer_values,
+                settings => settings_value,
+                created_at => created_at,
+                timestamp => timestamp,
+            }
+        }
+        ContentBlock::Unknown | _ => {
+            context! {
+                type => "unknown",
             }
         }
     }
@@ -382,18 +534,21 @@ impl Default for PostRenderer<'_> {
 
 /// Renders a block from a minijinja Value (used by the render_block template function)
 fn render_block_from_value(block: &Value) -> String {
-    let block_type = block.get_attr("type")
+    let block_type = block
+        .get_attr("type")
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default();
 
     match block_type.as_str() {
         "text" => {
-            let text = block.get_attr("text")
+            let text = block
+                .get_attr("text")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
-            let subtype = block.get_attr("subtype")
+            let subtype = block
+                .get_attr("subtype")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
@@ -405,15 +560,18 @@ fn render_block_from_value(block: &Value) -> String {
                 if let Some(len) = media.len() {
                     for i in 0..len {
                         if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m.get_attr("url")
+                            let url = m
+                                .get_attr("url")
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .unwrap_or_default();
-                            let alt = block.get_attr("alt_text")
+                            let alt = block
+                                .get_attr("alt_text")
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .unwrap_or_default();
-                            let width = m.get_attr("width")
+                            let width = m
+                                .get_attr("width")
                                 .ok()
                                 .and_then(|v| v.as_i64())
                                 .map(|w| format!(r#" width="{w}""#))
@@ -446,16 +604,20 @@ fn render_block_from_value(block: &Value) -> String {
                 if let Some(len) = media.len() {
                     for i in 0..len {
                         if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m.get_attr("url")
+                            let url = m
+                                .get_attr("url")
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .unwrap_or_default();
-                            let width = m.get_attr("width")
+                            let width = m
+                                .get_attr("width")
                                 .ok()
                                 .and_then(|v| v.as_i64())
                                 .map(|w| format!(r#" width="{w}""#))
                                 .unwrap_or_default();
-                            html.push_str(&format!(r#"<video controls src="{url}"{width}></video>"#));
+                            html.push_str(&format!(
+                                r#"<video controls src="{url}"{width}></video>"#
+                            ));
                         }
                     }
                 }
@@ -470,9 +632,18 @@ fn render_block_from_value(block: &Value) -> String {
         "audio" => {
             let mut html = String::from(r#"<div class="content-block audio-embed">"#);
 
-            let title = block.get_attr("title").ok().and_then(|v| v.as_str().map(|s| s.to_string()));
-            let artist = block.get_attr("artist").ok().and_then(|v| v.as_str().map(|s| s.to_string()));
-            let album = block.get_attr("album").ok().and_then(|v| v.as_str().map(|s| s.to_string()));
+            let title = block
+                .get_attr("title")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            let artist = block
+                .get_attr("artist")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            let album = block
+                .get_attr("album")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
 
             if title.is_some() || artist.is_some() || album.is_some() {
                 html.push_str(r#"<div class="audio-info">"#);
@@ -499,7 +670,8 @@ fn render_block_from_value(block: &Value) -> String {
                 if let Some(len) = media.len() {
                     for i in 0..len {
                         if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m.get_attr("url")
+                            let url = m
+                                .get_attr("url")
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .unwrap_or_default();
@@ -516,15 +688,18 @@ fn render_block_from_value(block: &Value) -> String {
             html
         }
         "link" => {
-            let url = block.get_attr("url")
+            let url = block
+                .get_attr("url")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
-            let title = block.get_attr("title")
+            let title = block
+                .get_attr("title")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| url.clone());
-            let mut html = format!(r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#);
+            let mut html =
+                format!(r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#);
             if let Ok(desc) = block.get_attr("description") {
                 if let Some(desc_str) = desc.as_str() {
                     html.push_str(&format!("<p>{desc_str}</p>"));
@@ -534,11 +709,58 @@ fn render_block_from_value(block: &Value) -> String {
             html
         }
         "paywall" => {
-            let text = block.get_attr("text")
+            let text = block
+                .get_attr("text")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "Premium content".to_string());
             format!(r#"<div class="content-block paywall">{text}</div>"#)
+        }
+        "poll" => {
+            let question = block
+                .get_attr("question")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let mut html = String::from(r#"<div class="content-block poll">"#);
+            html.push_str(&format!(r#"<div class="poll-question">{question}</div>"#));
+            html.push_str(r#"<ul class="poll-answers">"#);
+            if let Ok(answers) = block.get_attr("answers")
+                && let Some(len) = answers.len()
+            {
+                for i in 0..len {
+                    if let Ok(a) = answers.get_item(&Value::from(i)) {
+                        let text = a
+                            .get_attr("answer_text")
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        html.push_str(&format!("<li>{text}</li>"));
+                    }
+                }
+            }
+            html.push_str("</ul>");
+            if let Ok(settings) = block.get_attr("settings") {
+                let mut meta_parts: Vec<String> = Vec::new();
+                if let Ok(mc) = settings.get_attr("multiple_choice")
+                    && mc.is_true()
+                {
+                    meta_parts.push("Multiple choice".to_string());
+                }
+                if let Ok(status) = settings.get_attr("close_status")
+                    && let Some(s) = status.as_str()
+                {
+                    meta_parts.push(s.to_string());
+                }
+                if !meta_parts.is_empty() {
+                    html.push_str(&format!(
+                        r#"<div class="poll-meta">{}</div>"#,
+                        meta_parts.join(" · ")
+                    ));
+                }
+            }
+            html.push_str("</div>");
+            html
         }
         _ => String::new(),
     }

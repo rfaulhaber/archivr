@@ -44,14 +44,11 @@ fn save_auth(auth: &Auth, path: &Utf8Path) -> anyhow::Result<()> {
 fn make_oauth_config(
     consumer_key: &str,
     consumer_secret: &str,
-) -> crabrave::oauth::OAuth2Config {
+) -> crabrave::CrabResult<crabrave::oauth::OAuth2Config> {
     crabrave::oauth::OAuth2Config::new(
         consumer_key.to_owned(),
         consumer_secret.to_owned(),
-        format!(
-            "http://localhost:{}/redirect",
-            crate::DEFAULT_CALLBACK_PORT
-        ),
+        format!("http://localhost:{}/redirect", crate::DEFAULT_CALLBACK_PORT),
     )
 }
 
@@ -73,7 +70,7 @@ async fn interactive_auth(
     consumer_secret: &str,
     auth_file_path: &Utf8Path,
 ) -> anyhow::Result<Crabrave> {
-    let oauth_config = make_oauth_config(consumer_key, consumer_secret);
+    let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
     let (auth_url, csrf_token) = oauth_config.authorize_url();
 
     // Always print the URL to stdout so headless/no-RUST_LOG users can see it
@@ -141,11 +138,8 @@ pub async fn authenticate(
         // Token is expired — try refreshing
         if let Some(refresh_token) = auth.refresh_token.clone() {
             log::info!("access token expired, attempting refresh");
-            let oauth_config = make_oauth_config(consumer_key, consumer_secret);
-            match oauth_config
-                .refresh_access_token(refresh_token)
-                .await
-            {
+            let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
+            match oauth_config.refresh_access_token(refresh_token).await {
                 Ok(new_token) => {
                     let expires_at = compute_expires_at(&new_token);
                     // Preserve old refresh token if the server didn't issue a new one

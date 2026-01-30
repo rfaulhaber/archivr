@@ -15,7 +15,7 @@ anyhow = "1"
 camino = "1.2"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
-crabrave = "0.2"
+crabrave = "0.5"
 directories = "6"
 env_logger = "0.11"
 fs-err = { version = "3.2", features = ["tokio"] }
@@ -28,7 +28,7 @@ thiserror = "2"
 tokio = { version = "1.49", features = ["full"] }
 urlencoding = "2"
 
-[workspace.lints.clippy]
+[lints.clippy]
 await_holding_invalid_type = "deny"
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"

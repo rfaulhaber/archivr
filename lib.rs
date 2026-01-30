@@ -7,7 +7,7 @@ pub mod template;
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
 pub use job::{JobState, LastRun};
-pub use template::{PostRenderer, DEFAULT_TEMPLATE};
+pub use template::{DEFAULT_TEMPLATE, PostRenderer};
 
 use thiserror::Error;
 use tokio::{

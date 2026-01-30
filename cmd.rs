@@ -40,6 +40,9 @@ pub struct Args {
     #[arg(long, help = "Set post notes")]
     pub save_notes: bool,
 
+    #[arg(long, help = "Creats an index.html file as a landing page.")]
+    pub index_file: bool,
+
     #[arg(long, help = "Save posts as JSON")]
     pub json: bool,
 
@@ -60,10 +63,16 @@ pub struct Args {
     )]
     pub include_tags: Option<Vec<String>>,
 
-    #[arg(long, help = "Retrieve all posts before this date")]
+    #[arg(
+        long,
+        help = "Retrieve all posts before this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date"
+    )]
     pub before: Option<String>, // TODO make date
 
-    #[arg(long, help = "Retrieve all posts after this date")]
+    #[arg(
+        long,
+        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date"
+    )]
     pub after: Option<String>, // TODO make date
 
     #[arg(short, long, help = "Suppress progress output")]

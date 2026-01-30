@@ -27,10 +27,30 @@ pub struct ResolvedConfig {
     pub quiet: bool,
     pub incremental: bool,
     pub reauth: bool,
+    pub before: Option<i64>,
+    pub after: Option<i64>,
 }
 
 impl ResolvedConfig {
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
+        fn get_timestamp(timestamp_str: Option<String>) -> Option<i64> {
+            match timestamp_str {
+                Some(timestamp) => {
+                    let from_datetime = chrono::DateTime::parse_from_rfc3339(&timestamp).ok();
+
+                    let from_timestamp = timestamp
+                        .parse::<i64>()
+                        .ok()
+                        .and_then(|i| chrono::DateTime::from_timestamp_secs(i));
+
+                    from_datetime
+                        .map(|val| val.timestamp())
+                        .or_else(|| from_timestamp.map(|val| val.timestamp()))
+                }
+                None => None,
+            }
+        }
+
         let config: Option<Config> = if let Some(ref config_path) = args.config_file {
             let config_file_str = fs_err::read_to_string(config_path)?;
             Some(serde_json::from_str(&config_file_str)?)
@@ -73,6 +93,8 @@ impl ResolvedConfig {
             quiet: args.quiet,
             incremental: args.incremental,
             reauth: args.reauth,
+            before: get_timestamp(args.before),
+            after: get_timestamp(args.after),
         })
     }
 }

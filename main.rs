@@ -21,9 +21,13 @@ async fn main() -> anyhow::Result<()> {
     let data_dir = camino::Utf8Path::from_path(project_dir.data_local_dir())
         .ok_or_else(|| anyhow::anyhow!("Data directory path is not valid UTF-8"))?;
 
-    let client =
-        authenticate(&config.consumer_key, &config.consumer_secret, data_dir, config.reauth)
-            .await?;
+    let client = authenticate(
+        &config.consumer_key,
+        &config.consumer_secret,
+        data_dir,
+        config.reauth,
+    )
+    .await?;
 
     if !fs_err::exists(&config.output_dir)? {
         fs_err::create_dir_all(&config.output_dir)?;
@@ -67,8 +71,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let newest_timestamp =
-        run_backup(&client, &config, &renderer, &mut job, &job_file, incremental_cutoff).await?;
+    let newest_timestamp = run_backup(
+        &client,
+        &config,
+        &renderer,
+        &mut job,
+        &job_file,
+        incremental_cutoff,
+    )
+    .await?;
 
     if fs_err::exists(&job_file)? {
         JobState::delete(&job_file)?;
@@ -98,23 +109,27 @@ async fn run_backup(
     let mut posts_archived: u64 = 0;
 
     loop {
-        let post_response = client
+        let mut post_builder = client
             .blogs(config.blog_name.clone())
             .posts()
-            .offset(job.offset)
-            .send()
-            .await?;
+            .offset(job.offset);
 
-        if job.total_posts.is_none() {
-            job.total_posts = Some(post_response.total_posts);
+        if let Some(before) = config.before {
+            post_builder = post_builder.before(before);
         }
-        let total_posts = job.total_posts.unwrap_or(0);
 
-        log::info!(
-            "({}/{}) Fetching next batch of posts...",
-            job.offset,
-            total_posts
-        );
+        if let Some(after) = config.after {
+            post_builder = post_builder.after(after);
+        }
+
+        let post_response = post_builder.send().await?;
+
+        if post_response.posts.is_empty() {
+            log::info!("no more posts to fetch, ending backup");
+            break;
+        }
+
+        log::info!("({}) Fetching next batch of posts...", job.offset,);
 
         let mut reached_cutoff = false;
 
@@ -160,19 +175,10 @@ async fn run_backup(
         job.save(job_file)?;
 
         if !config.quiet {
-            if incremental_cutoff.is_some() {
-                writeln!(std::io::stdout(), "  {} new posts archived", posts_archived)?;
-            } else {
-                writeln!(
-                    std::io::stdout(),
-                    "  {}/{} posts archived",
-                    job.offset,
-                    total_posts
-                )?;
-            }
+            writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
         }
 
-        if reached_cutoff || job.offset >= total_posts {
+        if reached_cutoff {
             break;
         }
     }

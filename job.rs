@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 pub struct JobState {
     pub blog_name: String,
     pub offset: u64,
-    pub total_posts: Option<u64>,
     pub started_at: i64,
 }
 
@@ -14,7 +13,6 @@ impl JobState {
         Self {
             blog_name: blog_name.to_owned(),
             offset: 0,
-            total_posts: None,
             started_at: chrono::Utc::now().timestamp(),
         }
     }
