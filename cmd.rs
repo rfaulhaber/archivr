@@ -38,6 +38,9 @@ pub struct Args {
     #[arg(long, help = "Set to download audio from Tumblr")]
     pub save_audio: bool,
 
+    #[arg(long, help = "Set to download post images rather than link to them")]
+    pub save_images: bool,
+
     #[arg(long, help = "Set post notes")]
     pub save_notes: bool,
 
