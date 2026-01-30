@@ -24,6 +24,7 @@ pub struct Args {
     #[arg(
         short,
         long,
+        conflicts_with = "json",
         help = "Jinja template for formatting Tumblr posts. Exclusive to the --json flag"
     )]
     pub template: Option<Utf8PathBuf>,

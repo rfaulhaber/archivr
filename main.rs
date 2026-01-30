@@ -33,10 +33,12 @@ async fn main() -> anyhow::Result<()> {
         fs_err::create_dir_all(&config.output_dir)?;
     }
 
-    let renderer = if let Some(ref template_path) = config.template_path {
-        PostRenderer::from_file(template_path)?
+    let renderer = if config.json {
+        None
+    } else if let Some(ref template_path) = config.template_path {
+        Some(PostRenderer::from_file(template_path)?)
     } else {
-        PostRenderer::new()
+        Some(PostRenderer::new())
     };
 
     let job_file = JobState::job_file_path(&config.output_dir);
@@ -74,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let newest_timestamp = run_backup(
         &client,
         &config,
-        &renderer,
+        renderer.as_ref(),
         &mut job,
         &job_file,
         incremental_cutoff,
@@ -100,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_backup(
     client: &Crabrave,
     config: &ResolvedConfig,
-    renderer: &PostRenderer<'_>,
+    renderer: Option<&PostRenderer<'_>>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
     incremental_cutoff: Option<i64>,
@@ -154,19 +156,25 @@ async fn run_backup(
 
             log::info!("processing post {}", post.id);
 
-            let rendered = renderer.render(post)?;
+            let (content, ext) = if config.json {
+                (serde_json::to_string_pretty(post)?, "json")
+            } else {
+                let r = renderer
+                    .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
+                (r.render(post)?, "html")
+            };
 
             let output_file = if config.directories {
                 let post_dir = config.output_dir.join(&post.id);
                 if !fs_err::exists(&post_dir)? {
                     fs_err::create_dir(&post_dir)?;
                 }
-                post_dir.join("index.html")
+                post_dir.join(format!("index.{ext}"))
             } else {
-                config.output_dir.join(format!("{}.html", post.id))
+                config.output_dir.join(format!("{}.{ext}", post.id))
             };
 
-            fs_err::write(&output_file, &rendered)?;
+            fs_err::write(&output_file, &content)?;
             log::debug!("saved post {} to {}", post.id, output_file);
             posts_archived += 1;
         }
