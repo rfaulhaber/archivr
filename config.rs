@@ -41,7 +41,7 @@ impl ResolvedConfig {
                     let from_timestamp = timestamp
                         .parse::<i64>()
                         .ok()
-                        .and_then(|i| chrono::DateTime::from_timestamp_secs(i));
+                        .and_then(chrono::DateTime::from_timestamp_secs);
 
                     from_datetime
                         .map(|val| val.timestamp())

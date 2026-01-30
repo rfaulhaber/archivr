@@ -107,7 +107,9 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             ..
         } => {
             let mut html = String::new();
-            let m = media.get(0).unwrap();
+            let Some(m) = media.first() else {
+                return html;
+            };
             let alt = alt_text.as_deref().unwrap_or("");
             let width_attr = m
                 .width
@@ -299,14 +301,13 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
             caption,
             ..
         } => {
-            let m = media
+            let Some(m) = media
                 .iter()
-                .filter(|obj| match obj.has_original_dimensions {
-                    Some(true) => true,
-                    _ => false,
-                })
-                .next()
-                .unwrap_or_else(|| media.get(0).unwrap());
+                .find(|obj| matches!(obj.has_original_dimensions, Some(true)))
+                .or_else(|| media.first())
+            else {
+                return context! {};
+            };
 
             let media_values = vec![context! {
                 url => m.url,
@@ -556,36 +557,36 @@ fn render_block_from_value(block: &Value) -> String {
         }
         "image" => {
             let mut html = String::new();
-            if let Ok(media) = block.get_attr("media") {
-                if let Some(len) = media.len() {
-                    for i in 0..len {
-                        if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m
-                                .get_attr("url")
-                                .ok()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            let alt = block
-                                .get_attr("alt_text")
-                                .ok()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            let width = m
-                                .get_attr("width")
-                                .ok()
-                                .and_then(|v| v.as_i64())
-                                .map(|w| format!(r#" width="{w}""#))
-                                .unwrap_or_default();
-                            html.push_str(&format!(
-                                r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width}>"#
-                            ));
-                            if let Ok(caption) = block.get_attr("caption") {
-                                if let Some(cap) = caption.as_str() {
-                                    html.push_str(&format!("<figcaption>{cap}</figcaption>"));
-                                }
-                            }
-                            html.push_str("</figure>");
+            if let Ok(media) = block.get_attr("media")
+                && let Some(len) = media.len()
+            {
+                for i in 0..len {
+                    if let Ok(m) = media.get_item(&Value::from(i)) {
+                        let url = m
+                            .get_attr("url")
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        let alt = block
+                            .get_attr("alt_text")
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        let width = m
+                            .get_attr("width")
+                            .ok()
+                            .and_then(|v| v.as_i64())
+                            .map(|w| format!(r#" width="{w}""#))
+                            .unwrap_or_default();
+                        html.push_str(&format!(
+                            r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width}>"#
+                        ));
+                        if let Ok(caption) = block.get_attr("caption")
+                            && let Some(cap) = caption.as_str()
+                        {
+                            html.push_str(&format!("<figcaption>{cap}</figcaption>"));
                         }
+                        html.push_str("</figure>");
                     }
                 }
             }
@@ -593,38 +594,38 @@ fn render_block_from_value(block: &Value) -> String {
         }
         "video" => {
             let mut html = String::from(r#"<div class="content-block video-embed">"#);
-            if let Ok(embed) = block.get_attr("embed_html") {
-                if let Some(embed_str) = embed.as_str() {
-                    html.push_str(embed_str);
-                    html.push_str("</div>");
-                    return html;
-                }
+            if let Ok(embed) = block.get_attr("embed_html")
+                && let Some(embed_str) = embed.as_str()
+            {
+                html.push_str(embed_str);
+                html.push_str("</div>");
+                return html;
             }
-            if let Ok(media) = block.get_attr("media") {
-                if let Some(len) = media.len() {
-                    for i in 0..len {
-                        if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m
-                                .get_attr("url")
-                                .ok()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            let width = m
-                                .get_attr("width")
-                                .ok()
-                                .and_then(|v| v.as_i64())
-                                .map(|w| format!(r#" width="{w}""#))
-                                .unwrap_or_default();
-                            html.push_str(&format!(
-                                r#"<video controls src="{url}"{width}></video>"#
-                            ));
-                        }
+            if let Ok(media) = block.get_attr("media")
+                && let Some(len) = media.len()
+            {
+                for i in 0..len {
+                    if let Ok(m) = media.get_item(&Value::from(i)) {
+                        let url = m
+                            .get_attr("url")
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        let width = m
+                            .get_attr("width")
+                            .ok()
+                            .and_then(|v| v.as_i64())
+                            .map(|w| format!(r#" width="{w}""#))
+                            .unwrap_or_default();
+                        html.push_str(&format!(
+                            r#"<video controls src="{url}"{width}></video>"#
+                        ));
                     }
                 }
-            } else if let Ok(url) = block.get_attr("url") {
-                if let Some(url_str) = url.as_str() {
-                    html.push_str(&format!(r#"<a href="{url_str}">Video link</a>"#));
-                }
+            } else if let Ok(url) = block.get_attr("url")
+                && let Some(url_str) = url.as_str()
+            {
+                html.push_str(&format!(r#"<a href="{url_str}">Video link</a>"#));
             }
             html.push_str("</div>");
             html
@@ -659,30 +660,30 @@ fn render_block_from_value(block: &Value) -> String {
                 html.push_str("</div>");
             }
 
-            if let Ok(embed) = block.get_attr("embed_html") {
-                if let Some(embed_str) = embed.as_str() {
-                    html.push_str(embed_str);
-                    html.push_str("</div>");
-                    return html;
-                }
+            if let Ok(embed) = block.get_attr("embed_html")
+                && let Some(embed_str) = embed.as_str()
+            {
+                html.push_str(embed_str);
+                html.push_str("</div>");
+                return html;
             }
-            if let Ok(media) = block.get_attr("media") {
-                if let Some(len) = media.len() {
-                    for i in 0..len {
-                        if let Ok(m) = media.get_item(&Value::from(i)) {
-                            let url = m
-                                .get_attr("url")
-                                .ok()
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            html.push_str(&format!(r#"<audio controls src="{url}"></audio>"#));
-                        }
+            if let Ok(media) = block.get_attr("media")
+                && let Some(len) = media.len()
+            {
+                for i in 0..len {
+                    if let Ok(m) = media.get_item(&Value::from(i)) {
+                        let url = m
+                            .get_attr("url")
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        html.push_str(&format!(r#"<audio controls src="{url}"></audio>"#));
                     }
                 }
-            } else if let Ok(url) = block.get_attr("url") {
-                if let Some(url_str) = url.as_str() {
-                    html.push_str(&format!(r#"<a href="{url_str}">Audio link</a>"#));
-                }
+            } else if let Ok(url) = block.get_attr("url")
+                && let Some(url_str) = url.as_str()
+            {
+                html.push_str(&format!(r#"<a href="{url_str}">Audio link</a>"#));
             }
             html.push_str("</div>");
             html
@@ -700,10 +701,10 @@ fn render_block_from_value(block: &Value) -> String {
                 .unwrap_or_else(|| url.clone());
             let mut html =
                 format!(r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#);
-            if let Ok(desc) = block.get_attr("description") {
-                if let Some(desc_str) = desc.as_str() {
-                    html.push_str(&format!("<p>{desc_str}</p>"));
-                }
+            if let Ok(desc) = block.get_attr("description")
+                && let Some(desc_str) = desc.as_str()
+            {
+                html.push_str(&format!("<p>{desc_str}</p>"));
             }
             html.push_str("</div>");
             html
