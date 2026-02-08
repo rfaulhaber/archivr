@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use archivr::{Args, JobState, LastRun, PostRenderer, ResolvedConfig, auth::authenticate};
+use archivr::{
+    Args, JobState, LastRun, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
+};
 use clap::Parser;
 use crabrave::Crabrave;
 
@@ -105,9 +107,9 @@ async fn run_backup(
     renderer: Option<&PostRenderer<'_>>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
-    incremental_cutoff: Option<i64>,
-) -> anyhow::Result<Option<i64>> {
-    let mut newest_timestamp: Option<i64> = None;
+    incremental_cutoff: Option<PostTimestamp>,
+) -> anyhow::Result<Option<PostTimestamp>> {
+    let mut newest_timestamp: Option<PostTimestamp> = None;
     let mut posts_archived: u64 = 0;
 
     loop {

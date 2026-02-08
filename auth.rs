@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use camino::Utf8Path;
-use crabrave::Crabrave;
+use crabrave::{Crabrave, oauth::OAuthScope};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +49,7 @@ fn make_oauth_config(
         consumer_key.to_owned(),
         consumer_secret.to_owned(),
         format!("http://localhost:{}/redirect", crate::DEFAULT_CALLBACK_PORT),
+        vec![OAuthScope::Basic, OAuthScope::Write, OAuthScope::Offline],
     )
 }
 

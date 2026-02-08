@@ -2,7 +2,7 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
+#[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
     pub blog_name: String,
 

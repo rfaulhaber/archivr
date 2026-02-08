@@ -17,6 +17,8 @@ use tokio::{
 
 pub const DEFAULT_CALLBACK_PORT: u16 = 6263;
 
+pub type PostTimestamp = i64;
+
 #[derive(Debug, Error)]
 pub enum ArchivrError {
     #[error("Callback was not in expected format. Please report this bug.")]

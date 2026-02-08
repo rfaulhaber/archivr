@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use serde::Deserialize;
 
-use crate::{ArchivrError, Args};
+use crate::{ArchivrError, Args, PostTimestamp};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -27,8 +27,8 @@ pub struct ResolvedConfig {
     pub quiet: bool,
     pub incremental: bool,
     pub reauth: bool,
-    pub before: Option<i64>,
-    pub after: Option<i64>,
+    pub before: Option<PostTimestamp>,
+    pub after: Option<PostTimestamp>,
 }
 
 impl ResolvedConfig {

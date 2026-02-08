@@ -1,11 +1,13 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
+use crate::PostTimestamp;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobState {
     pub blog_name: String,
     pub offset: u64,
-    pub started_at: i64,
+    pub started_at: PostTimestamp,
 }
 
 impl JobState {
@@ -42,7 +44,7 @@ impl JobState {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LastRun {
     pub blog_name: String,
-    pub newest_post_timestamp: i64,
+    pub newest_post_timestamp: PostTimestamp,
     pub completed_at: i64,
 }
 
