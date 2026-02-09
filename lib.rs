@@ -6,7 +6,7 @@ pub mod template;
 
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
-pub use job::{JobState, LastRun};
+pub use job::JobState;
 pub use template::{DEFAULT_TEMPLATE, PostRenderer};
 
 use thiserror::Error;

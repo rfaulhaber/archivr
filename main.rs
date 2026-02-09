@@ -1,8 +1,6 @@
 use std::io::Write;
 
-use archivr::{
-    Args, JobState, LastRun, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
-};
+use archivr::{Args, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate};
 use clap::Parser;
 use crabrave::Crabrave;
 
@@ -45,16 +43,20 @@ async fn main() -> anyhow::Result<()> {
 
     let job_file = JobState::job_file_path(&config.output_dir);
     let mut job = if config.resume {
-        JobState::load(&job_file)?
+        JobState::load(&job_file).unwrap_or_else(|_| JobState::new(&config.blog_name))
     } else {
         JobState::new(&config.blog_name)
     };
 
-    let marker_file = LastRun::marker_path(&config.output_dir);
-    let incremental_cutoff = if config.incremental {
-        match LastRun::load(&marker_file) {
-            Ok(last_run) => Some(last_run.newest_post_timestamp),
-            Err(_e) => {
+    let marker_file = JobState::job_file_path(&config.output_dir);
+
+    log::debug!("Marker file: {:?}", marker_file);
+
+    let incremental_cutoff = if config.resume {
+        match JobState::load(&marker_file) {
+            Ok(last_run) => Some(last_run.offset),
+            Err(e) => {
+                log::debug!("failed to load job file with following error: {e:?}");
                 log::info!("no previous run marker found, performing full backup");
                 None
             }
@@ -63,11 +65,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    log::debug!("Incremental cutoff set to {incremental_cutoff:?}");
+
     if !config.quiet {
-        if config.incremental {
+        if config.resume {
             writeln!(
                 std::io::stdout(),
-                "Backing up {} (incremental)...",
+                "Backing up {} (resuming previous job)...",
                 config.blog_name
             )?;
         } else {
@@ -75,23 +79,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let newest_timestamp = run_backup(
-        &client,
-        &config,
-        renderer.as_ref(),
-        &mut job,
-        &job_file,
-        incremental_cutoff,
-    )
-    .await?;
+    let _ = run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
 
     if fs_err::exists(&job_file)? {
         JobState::delete(&job_file)?;
-    }
-
-    if let Some(ts) = newest_timestamp {
-        let last_run = LastRun::new(&config.blog_name, ts);
-        last_run.save(&marker_file)?;
     }
 
     if !config.quiet {
@@ -107,7 +98,6 @@ async fn run_backup(
     renderer: Option<&PostRenderer<'_>>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
-    incremental_cutoff: Option<PostTimestamp>,
 ) -> anyhow::Result<Option<PostTimestamp>> {
     let mut newest_timestamp: Option<PostTimestamp> = None;
     let mut posts_archived: u64 = 0;
@@ -126,7 +116,18 @@ async fn run_backup(
             post_builder = post_builder.after(after);
         }
 
-        let post_response = post_builder.send().await?;
+        let post_response = post_builder.send().await;
+
+        if let Err(crabrave::CrabError::RateLimit { retry_after }) = post_response {
+            let retry_after = match retry_after {
+                Some(i) => format!("Hit rate limit. Retry after {i} seconds"),
+                None => "Hit rate limit, please retry later.".into(),
+            };
+
+            return Err(anyhow::anyhow!(retry_after));
+        }
+
+        let post_response = post_response?;
 
         if post_response.posts.is_empty() {
             log::info!("no more posts to fetch, ending backup");
@@ -135,21 +136,7 @@ async fn run_backup(
 
         log::info!("({}) Fetching next batch of posts...", job.offset,);
 
-        let mut reached_cutoff = false;
-
         for post in &post_response.posts {
-            if let Some(cutoff) = incremental_cutoff
-                && post.timestamp <= cutoff
-            {
-                log::info!(
-                    "reached incremental cutoff at post {} (timestamp {})",
-                    post.id,
-                    post.timestamp
-                );
-                reached_cutoff = true;
-                break;
-            }
-
             newest_timestamp = Some(match newest_timestamp {
                 Some(current) if post.timestamp > current => post.timestamp,
                 Some(current) => current,
@@ -186,10 +173,6 @@ async fn run_backup(
 
         if !config.quiet {
             writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
-        }
-
-        if reached_cutoff {
-            break;
         }
     }
 

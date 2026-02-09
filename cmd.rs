@@ -82,12 +82,6 @@ pub struct Args {
     #[arg(short, long, help = "Suppress progress output")]
     pub quiet: bool,
 
-    #[arg(
-        long,
-        help = "Only fetches all new posts since last run based on the destination directory. If a job has never been run, this flag functionally has no effect"
-    )]
-    pub incremental: bool,
-
     #[arg(long, help = "Force re-authentication, ignoring any saved tokens")]
     pub reauth: bool,
 }
