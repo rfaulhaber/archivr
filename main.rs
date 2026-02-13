@@ -26,6 +26,8 @@ async fn main() -> anyhow::Result<()> {
         &config.consumer_secret,
         data_dir,
         config.reauth,
+        config.cookies_file.as_deref(),
+        config.dashboard,
     )
     .await?;
 

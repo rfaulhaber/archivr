@@ -84,4 +84,17 @@ pub struct Args {
 
     #[arg(long, help = "Force re-authentication, ignoring any saved tokens")]
     pub reauth: bool,
+
+    #[arg(
+        long,
+        help = "Path to a Netscape/Mozilla-format cookies file (e.g. exported by a browser extension). Cookies will be sent with API requests, enabling access to dashboard-only blogs"
+    )]
+    pub cookies_file: Option<Utf8PathBuf>,
+
+    #[arg(
+        long,
+        requires = "cookies_file",
+        help = "Use Tumblr's internal dashboard API instead of the public API. Requires --cookies-file. Enables access to dashboard-only blogs"
+    )]
+    pub dashboard: bool,
 }

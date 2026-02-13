@@ -1,7 +1,8 @@
 use std::io::Write;
+use std::sync::Arc;
 
 use camino::Utf8Path;
-use crabrave::{Crabrave, oauth::OAuthScope};
+use crabrave::{CookieJar, Crabrave, oauth::OAuthScope};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,16 +54,30 @@ fn make_oauth_config(
     )
 }
 
+/// Base URL for Tumblr's internal dashboard API
+const DASHBOARD_API_URL: &str = "https://www.tumblr.com/api/v2";
+
 fn build_client(
     consumer_key: &str,
     consumer_secret: &str,
     access_token: &str,
+    cookie_jar: Option<Arc<CookieJar>>,
+    dashboard: bool,
 ) -> anyhow::Result<Crabrave> {
-    let client = Crabrave::builder()
+    let mut builder = Crabrave::builder()
         .consumer_key(consumer_key.to_owned())
         .consumer_secret(consumer_secret.to_owned())
-        .access_token(access_token)
-        .build()?;
+        .access_token(access_token);
+
+    if let Some(jar) = cookie_jar {
+        builder = builder.cookie_jar(jar);
+    }
+
+    if dashboard {
+        builder = builder.base_url(DASHBOARD_API_URL);
+    }
+
+    let client = builder.build()?;
     Ok(client)
 }
 
@@ -70,6 +85,8 @@ async fn interactive_auth(
     consumer_key: &str,
     consumer_secret: &str,
     auth_file_path: &Utf8Path,
+    cookie_jar: Option<Arc<CookieJar>>,
+    dashboard: bool,
 ) -> anyhow::Result<Crabrave> {
     let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
     let (auth_url, csrf_token) = oauth_config.authorize_url();
@@ -112,7 +129,52 @@ async fn interactive_auth(
     };
 
     save_auth(&auth, auth_file_path)?;
-    build_client(consumer_key, consumer_secret, &auth.access_token)
+    build_client(
+        consumer_key,
+        consumer_secret,
+        &auth.access_token,
+        cookie_jar,
+        dashboard,
+    )
+}
+
+/// Parses a Netscape/Mozilla-format cookie file into a [`CookieJar`].
+///
+/// The format is tab-separated with fields:
+/// `domain \t include_subdomains \t path \t secure \t expiry \t name \t value`
+///
+/// Lines starting with `#` are comments and blank lines are skipped.
+fn parse_cookie_file(path: &Utf8Path) -> anyhow::Result<Arc<CookieJar>> {
+    let contents = fs_err::read_to_string(path)?;
+    let jar = CookieJar::default();
+    let tumblr_url: url::Url = "https://www.tumblr.com"
+        .parse()
+        .map_err(|e| anyhow::anyhow!("failed to parse tumblr URL: {e}"))?;
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 7 {
+            log::warn!("skipping malformed cookie line: {line}");
+            continue;
+        }
+
+        let domain = fields[0];
+        // Only load cookies relevant to Tumblr
+        if !domain.contains("tumblr.com") {
+            continue;
+        }
+
+        let name = fields[5];
+        let value = fields[6];
+        jar.add_cookie_str(&format!("{name}={value}"), &tumblr_url);
+    }
+
+    Ok(Arc::new(jar))
 }
 
 pub async fn authenticate(
@@ -120,12 +182,23 @@ pub async fn authenticate(
     consumer_secret: &str,
     data_dir: &Utf8Path,
     reauth: bool,
+    cookies_file: Option<&Utf8Path>,
+    dashboard: bool,
 ) -> anyhow::Result<Crabrave> {
     fs_err::create_dir_all(data_dir)?;
     let auth_file_path = data_dir.join("auth.json");
 
+    let cookie_jar = cookies_file.map(parse_cookie_file).transpose()?;
+
     if reauth {
-        return interactive_auth(consumer_key, consumer_secret, &auth_file_path).await;
+        return interactive_auth(
+            consumer_key,
+            consumer_secret,
+            &auth_file_path,
+            cookie_jar,
+            dashboard,
+        )
+        .await;
     }
 
     if fs_err::exists(&auth_file_path)? {
@@ -133,7 +206,13 @@ pub async fn authenticate(
         let auth: Auth = serde_json::from_str(&auth_str)?;
 
         if !auth.is_expired() {
-            return build_client(consumer_key, consumer_secret, &auth.access_token);
+            return build_client(
+                consumer_key,
+                consumer_secret,
+                &auth.access_token,
+                cookie_jar,
+                dashboard,
+            );
         }
 
         // Token is expired — try refreshing
@@ -155,6 +234,8 @@ pub async fn authenticate(
                         consumer_key,
                         consumer_secret,
                         &refreshed_auth.access_token,
+                        cookie_jar,
+                        dashboard,
                     );
                 }
                 Err(_e) => {
@@ -164,5 +245,12 @@ pub async fn authenticate(
         }
     }
 
-    interactive_auth(consumer_key, consumer_secret, &auth_file_path).await
+    interactive_auth(
+        consumer_key,
+        consumer_secret,
+        &auth_file_path,
+        cookie_jar,
+        dashboard,
+    )
+    .await
 }

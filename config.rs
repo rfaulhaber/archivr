@@ -28,6 +28,8 @@ pub struct ResolvedConfig {
     pub reauth: bool,
     pub before: Option<PostTimestamp>,
     pub after: Option<PostTimestamp>,
+    pub cookies_file: Option<Utf8PathBuf>,
+    pub dashboard: bool,
 }
 
 impl ResolvedConfig {
@@ -93,6 +95,8 @@ impl ResolvedConfig {
             reauth: args.reauth,
             before: get_timestamp(args.before),
             after: get_timestamp(args.after),
+            cookies_file: args.cookies_file,
+            dashboard: args.dashboard,
         })
     }
 }
