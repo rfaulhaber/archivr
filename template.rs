@@ -48,6 +48,10 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
     .unsupported-block { color: #999; font-style: italic; }
     figure { margin: 1rem 0; }
     figcaption { font-size: 0.9rem; color: #666; margin-top: 0.5rem; }
+    .post-nav { display: flex; justify-content: space-between; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #ddd; }
+    .post-nav a { color: #0066cc; text-decoration: none; }
+    .post-nav a:hover { text-decoration: underline; }
+    .post-nav:not(:has(a)) { display: none; }
   </style>
 </head>
 <body>
@@ -87,9 +91,21 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
     </div>
     {%- endif %}
   </article>
+  <nav class="post-nav">
+    {%- if newer_href %}<a href="{{ newer_href }}">&larr; Newer</a>{%- else %}<span></span>{%- endif %}
+    <!-- ARCHIVR:OLDER_NAV -->
+  </nav>
 </body>
 </html>
 "##;
+
+/// HTML comment placeholder inserted by the template, replaced after the next post is known
+pub const OLDER_NAV_PLACEHOLDER: &str = "<!-- ARCHIVR:OLDER_NAV -->";
+
+/// Builds the HTML for an "Older" navigation link, to be substituted for [`OLDER_NAV_PLACEHOLDER`].
+pub fn build_older_nav_link(href: &str) -> String {
+    format!(r#"<a href="{href}">Older &rarr;</a>"#)
+}
 
 /// Renders a single ContentBlock to HTML
 ///
@@ -514,13 +530,16 @@ impl<'a> PostRenderer<'a> {
     }
 
     /// Renders a post to HTML
-    pub fn render(&self, post: &Post) -> anyhow::Result<String> {
+    ///
+    /// `newer_href` is an optional relative link to the next-newer post for navigation.
+    pub fn render(&self, post: &Post, newer_href: Option<&str>) -> anyhow::Result<String> {
         let template = self.env.get_template(self.template_name)?;
         let post_value = post_to_value(post);
         let ctx = context! {
             post => post_value,
             is_reblog => post.reblogged_from_name.is_some(),
             is_original => post.reblogged_from_name.is_none(),
+            newer_href => newer_href,
         };
         let result = template.render(ctx)?;
         Ok(result)

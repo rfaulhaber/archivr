@@ -4,6 +4,7 @@ use std::io::Write;
 use archivr::{
     Args, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
     images::{collect_image_urls, download_images, rewrite_post_image_urls},
+    template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
 use clap::Parser;
 use crabrave::Crabrave;
@@ -84,6 +85,30 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A buffered HTML post waiting for its "older" nav link before being written to disk.
+struct BufferedHtmlPost {
+    content: String,
+    output_file: camino::Utf8PathBuf,
+    /// Relative href for *this* post (used as `newer_href` by the next post).
+    relative_href: String,
+}
+
+/// Compute the relative href for a post given its ID and the output mode.
+fn post_relative_href(post_id: &str, directories: bool) -> String {
+    if directories {
+        format!("../{post_id}/")
+    } else {
+        format!("{post_id}.html")
+    }
+}
+
+/// Replace the older-nav placeholder with the real link and write the file to disk.
+fn finalize_buffered_post(buf: &BufferedHtmlPost, older_html: &str) -> anyhow::Result<()> {
+    let final_content = buf.content.replace(OLDER_NAV_PLACEHOLDER, older_html);
+    fs_err::write(&buf.output_file, &final_content)?;
+    Ok(())
+}
+
 async fn run_backup(
     client: &Crabrave,
     config: &ResolvedConfig,
@@ -93,6 +118,7 @@ async fn run_backup(
 ) -> anyhow::Result<Option<PostTimestamp>> {
     let mut newest_timestamp: Option<PostTimestamp> = None;
     let mut posts_archived: u64 = 0;
+    let mut buffered: Option<BufferedHtmlPost> = None;
 
     loop {
         let mut post_builder = client
@@ -159,26 +185,53 @@ async fn run_backup(
                 Cow::Borrowed(post)
             };
 
-            let (content, ext) = if config.json {
-                (serde_json::to_string_pretty(&*post)?, "json")
+            if config.json {
+                // JSON mode: write immediately, no navigation
+                let content = serde_json::to_string_pretty(&*post)?;
+                let output_file = if config.directories {
+                    let post_dir = config.output_dir.join(&post.id);
+                    if !fs_err::exists(&post_dir)? {
+                        fs_err::create_dir(&post_dir)?;
+                    }
+                    post_dir.join("index.json")
+                } else {
+                    config.output_dir.join(format!("{}.json", post.id))
+                };
+                fs_err::write(&output_file, &content)?;
+                log::debug!("saved post {} to {}", post.id, output_file);
             } else {
+                // HTML mode: buffer for nav link injection
                 let r = renderer
                     .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
-                (r.render(&post)?, "html")
-            };
 
-            let output_file = if config.directories {
-                let post_dir = config.output_dir.join(&post.id);
-                if !fs_err::exists(&post_dir)? {
-                    fs_err::create_dir(&post_dir)?;
+                let newer_href = buffered.as_ref().map(|b| b.relative_href.as_str());
+                let content = r.render(&post, newer_href)?;
+
+                let output_file = if config.directories {
+                    let post_dir = config.output_dir.join(&post.id);
+                    if !fs_err::exists(&post_dir)? {
+                        fs_err::create_dir(&post_dir)?;
+                    }
+                    post_dir.join("index.html")
+                } else {
+                    config.output_dir.join(format!("{}.html", post.id))
+                };
+
+                let current_href = post_relative_href(&post.id, config.directories);
+
+                // Finalize the previous buffered post now that we know its "older" neighbor
+                if let Some(prev) = buffered.take() {
+                    let older_link = build_older_nav_link(&current_href);
+                    finalize_buffered_post(&prev, &older_link)?;
                 }
-                post_dir.join(format!("index.{ext}"))
-            } else {
-                config.output_dir.join(format!("{}.{ext}", post.id))
-            };
 
-            fs_err::write(&output_file, &content)?;
-            log::debug!("saved post {} to {}", post.id, output_file);
+                buffered = Some(BufferedHtmlPost {
+                    content,
+                    output_file,
+                    relative_href: current_href,
+                });
+            }
+
             posts_archived += 1;
         }
 
@@ -188,6 +241,11 @@ async fn run_backup(
         if !config.quiet {
             writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
         }
+    }
+
+    // Finalize the last buffered HTML post (no older neighbor)
+    if let Some(last) = buffered.take() {
+        finalize_buffered_post(&last, "<span></span>")?;
     }
 
     Ok(newest_timestamp)
