@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::PostTimestamp;
 
+pub const JOB_FILE_PATH: &str = ".archivr-job.json";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobState {
     pub blog_name: String,
@@ -37,6 +39,6 @@ impl JobState {
     }
 
     pub fn job_file_path(output_dir: &Utf8Path) -> Utf8PathBuf {
-        output_dir.join(".archivr-job.json")
+        output_dir.join(JOB_FILE_PATH)
     }
 }

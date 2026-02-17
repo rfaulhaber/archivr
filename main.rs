@@ -1,8 +1,13 @@
+use std::borrow::Cow;
 use std::io::Write;
 
-use archivr::{Args, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate};
+use archivr::{
+    Args, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
+    images::{collect_image_urls, download_images, rewrite_post_image_urls},
+};
 use clap::Parser;
 use crabrave::Crabrave;
+use crabrave::handlers::blog::Post;
 
 const PROJECT_QUALIFIER: &str = "com.ryanfaulhaber";
 const PROJECT_NAME: &str = "archivr";
@@ -53,21 +58,6 @@ async fn main() -> anyhow::Result<()> {
     let marker_file = JobState::job_file_path(&config.output_dir);
 
     log::debug!("Marker file: {:?}", marker_file);
-
-    let incremental_cutoff = if config.resume {
-        match JobState::load(&marker_file) {
-            Ok(last_run) => Some(last_run.offset),
-            Err(e) => {
-                log::debug!("failed to load job file with following error: {e:?}");
-                log::info!("no previous run marker found, performing full backup");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    log::debug!("Incremental cutoff set to {incremental_cutoff:?}");
 
     if !config.quiet {
         if config.resume {
@@ -147,12 +137,34 @@ async fn run_backup(
 
             log::info!("processing post {}", post.id);
 
+            let post: Cow<'_, Post> = if config.save_images {
+                let urls = collect_image_urls(post);
+                if urls.is_empty() {
+                    Cow::Borrowed(post)
+                } else {
+                    let (media_dir, relative_prefix) = if config.directories {
+                        let dir = config.output_dir.join(&post.id).join("media");
+                        (dir, "media/".to_owned())
+                    } else {
+                        let dir = config.output_dir.join("media").join("images");
+                        (dir, "media/images/".to_owned())
+                    };
+
+                    let url_map =
+                        download_images(client.client(), &urls, &media_dir, &relative_prefix)
+                            .await;
+                    rewrite_post_image_urls(post, &url_map)
+                }
+            } else {
+                Cow::Borrowed(post)
+            };
+
             let (content, ext) = if config.json {
-                (serde_json::to_string_pretty(post)?, "json")
+                (serde_json::to_string_pretty(&*post)?, "json")
             } else {
                 let r = renderer
                     .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
-                (r.render(post)?, "html")
+                (r.render(&post)?, "html")
             };
 
             let output_file = if config.directories {
