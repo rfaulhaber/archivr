@@ -23,10 +23,15 @@ pub fn collect_image_urls(post: &Post) -> Vec<String> {
 fn collect_from_blocks(blocks: &[ContentBlock], urls: &mut Vec<String>) {
     for block in blocks {
         if let ContentBlock::Image { media, .. } = block {
-            for media_obj in media {
-                if !media_obj.url.is_empty() && matches!(media_obj.has_original_dimensions, Some(true)) {
-                    urls.push(media_obj.url.clone());
-                }
+            // Prefer the original-dimensions image, fall back to the first available
+            let best = media
+                .iter()
+                .find(|m| matches!(m.has_original_dimensions, Some(true)))
+                .or_else(|| media.first());
+            if let Some(m) = best
+                && !m.url.is_empty()
+            {
+                urls.push(m.url.clone());
             }
         }
     }

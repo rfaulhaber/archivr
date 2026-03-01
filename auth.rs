@@ -50,7 +50,7 @@ fn make_oauth_config(
         consumer_key.to_owned(),
         consumer_secret.to_owned(),
         format!("http://localhost:{}/redirect", crate::DEFAULT_CALLBACK_PORT),
-        vec![OAuthScope::Basic, OAuthScope::Write, OAuthScope::Offline],
+        vec![OAuthScope::Basic, OAuthScope::Offline],
     )
 }
 

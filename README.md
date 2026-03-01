@@ -29,6 +29,26 @@ archivr <BLOG_NAME> --consumer-key <YOUR CONSUMER KEY> --consumer-secret <YOUR C
 
 This will kick off a job to back up an entire blog.
 
+### CLI flags
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--consumer-key` | | Tumblr OAuth consumer key |
+| `--consumer-secret` | | Tumblr OAuth consumer secret |
+| `--config-file` | | Path to a JSON config file with `blog_name`, `consumer_key`, and `consumer_secret` |
+| `--output-dir` | `-o` | Output directory (defaults to `./{blog_name}`) |
+| `--json` | | Save posts as raw JSON instead of HTML |
+| `--template` | `-t` | Custom Jinja template for HTML output (exclusive with `--json`) |
+| `--directories` | `-d` | Create a subdirectory for each post |
+| `--save-images` | | Download post images locally instead of linking to CDN |
+| `--before` | | Only fetch posts before this date (Unix timestamp or RFC3339) |
+| `--after` | | Only fetch posts after this date (Unix timestamp or RFC3339) |
+| `--resume` | | Resume a previously interrupted backup |
+| `--quiet` | `-q` | Suppress progress output |
+| `--reauth` | | Force re-authentication, ignoring saved tokens |
+| `--cookies-file` | | Path to a Netscape/Mozilla-format cookies file for dashboard access |
+| `--dashboard` | | Use Tumblr's internal dashboard API (requires `--cookies-file`) |
+
 ### Job config file
 
 You can specify all of the CLI arguments in a config file as well, passing `--config-file <PATH>` instead.
@@ -54,6 +74,7 @@ Your template receives the following variables:
 | `post` | object | The full post object (see fields below) |
 | `is_reblog` | bool | `true` if the post was reblogged from another blog |
 | `is_original` | bool | `true` if the post is original content |
+| `newer_href` | string? | Relative URL to the next-newer post (for navigation links) |
 
 #### Post fields
 
@@ -158,18 +179,6 @@ You can also selectively override rendering for specific block types:
 {% endfor %}
 ```
 
-## Planned features
-
-The following features are not yet implemented but are planned for future releases:
-
-- Incremental backups (only fetch posts newer than the last run)
-- Video and audio downloading (`--save-video`, `--save-audio`)
-- Liked posts backup (`--likes`)
-- Tag filtering (`--include-tags`)
-- Notes backup (`--save-notes`)
-- Index page generation (`--index-file`)
-- Automatic rate limit retry with backoff
-
 #### Example: minimal custom template
 
 ```jinja
@@ -203,3 +212,15 @@ The following features are not yet implemented but are planned for future releas
 </body>
 </html>
 ```
+
+## Planned features
+
+The following features are not yet implemented but are planned for future releases:
+
+- Incremental backups (only fetch posts newer than the last run)
+- Video and audio downloading (`--save-video`, `--save-audio`)
+- Liked posts backup (`--likes`)
+- Tag filtering (`--include-tags`)
+- Notes backup (`--save-notes`)
+- Index page generation (`--index-file`)
+- Automatic rate limit retry with backoff

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::io::Write;
 
 use archivr::{
-    Args, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
+    Args, JobState, PostRenderer, ResolvedConfig, auth::authenticate,
     images::{collect_image_urls, download_images, rewrite_post_image_urls},
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let _ = run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
+    run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
 
     if fs_err::exists(&job_file)? {
         JobState::delete(&job_file)?;
@@ -145,8 +145,7 @@ async fn run_backup(
     renderer: Option<&PostRenderer<'_>>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
-) -> anyhow::Result<Option<PostTimestamp>> {
-    let mut newest_timestamp: Option<PostTimestamp> = None;
+) -> anyhow::Result<()> {
     let mut posts_archived: u64 = 0;
     let mut buffered: Option<BufferedHtmlPost> = None;
 
@@ -190,12 +189,6 @@ async fn run_backup(
         log::info!("({}) Fetching next batch of posts...", job.offset,);
 
         for post in &post_response.posts {
-            newest_timestamp = Some(match newest_timestamp {
-                Some(current) if post.timestamp > current => post.timestamp,
-                Some(current) => current,
-                None => post.timestamp,
-            });
-
             log::info!("processing post {}", post.id);
 
             let post: Cow<'_, Post> = if config.save_images {
@@ -283,5 +276,5 @@ async fn run_backup(
         finalize_buffered_post(&last, "<span></span>")?;
     }
 
-    Ok(newest_timestamp)
+    Ok(())
 }

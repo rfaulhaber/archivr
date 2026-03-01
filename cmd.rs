@@ -1,9 +1,18 @@
 use camino::Utf8PathBuf;
 use clap::Parser;
 
+fn non_empty_string(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("blog name cannot be empty".to_owned())
+    } else {
+        Ok(s.to_owned())
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
+    #[arg(help = "Name of the Tumblr blog to back up", value_parser = non_empty_string)]
     pub blog_name: String,
 
     #[arg(long, help = "Tumblr OAuth consumer key")]
