@@ -17,8 +17,8 @@ In order to interact with the Tumblr API, archivr needs an OAuth consumer key an
    2. **Application website**: codeberg.org/ryf/archivr (again, doesn't really matter)
    3. **Application description**: Tumblr backup tool
    4. **Administrative contact email**: your email
-   5. **Default callback URL**: `https://localhost:6263/callback`
-   6. **OAuth2 redirect URLs**: `https://localhost:6263/redirect`
+   5. **Default callback URL**: `http://localhost:6263/callback`
+   6. **OAuth2 redirect URLs**: `http://localhost:6263/redirect`
 5. Click "Save changes"
 
 ## Usage
@@ -157,6 +157,18 @@ You can also selectively override rendering for specific block types:
   {% endif %}
 {% endfor %}
 ```
+
+## Planned features
+
+The following features are not yet implemented but are planned for future releases:
+
+- Incremental backups (only fetch posts newer than the last run)
+- Video and audio downloading (`--save-video`, `--save-audio`)
+- Liked posts backup (`--likes`)
+- Tag filtering (`--include-tags`)
+- Notes backup (`--save-notes`)
+- Index page generation (`--index-file`)
+- Automatic rate limit retry with backoff
 
 #### Example: minimal custom template
 

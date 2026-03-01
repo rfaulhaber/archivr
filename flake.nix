@@ -57,7 +57,6 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust-bin.stable.latest.default
-            clippy
             rust-analyzer
             cargo-nextest
           ];

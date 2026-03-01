@@ -17,7 +17,7 @@ pub struct Args {
 
     #[arg(
         long,
-        help = "Resume last job, if applicable. Exits with error if no job in progress was found"
+        help = "Resume last job if one exists, otherwise start a new backup"
     )]
     pub resume: bool,
 
@@ -32,26 +32,11 @@ pub struct Args {
     #[arg(short, long, help = "Use directories for each post")]
     pub directories: bool,
 
-    #[arg(long, help = "Set to download videos from Tumblr")]
-    pub save_video: bool,
-
-    #[arg(long, help = "Set to download audio from Tumblr")]
-    pub save_audio: bool,
-
     #[arg(long, help = "Set to download post images rather than link to them")]
     pub save_images: bool,
 
-    #[arg(long, help = "Set post notes")]
-    pub save_notes: bool,
-
-    #[arg(long, help = "Creats an index.html file as a landing page.")]
-    pub index_file: bool,
-
     #[arg(long, help = "Save posts as JSON")]
     pub json: bool,
-
-    #[arg(long, help = "Fetches liked posts instead of blog posts")]
-    pub likes: bool,
 
     #[arg(
         short,
@@ -59,13 +44,6 @@ pub struct Args {
         help = "Path to output posts to, defaulting to ./{blog-name}"
     )]
     pub output_dir: Option<Utf8PathBuf>,
-
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "If set, will only back up posts that include these tags. Must be comma-separated without spaces, e.g. foo,bar,baz"
-    )]
-    pub include_tags: Option<Vec<String>>,
 
     #[arg(
         long,

@@ -56,10 +56,6 @@ async fn main() -> anyhow::Result<()> {
         JobState::new(&config.blog_name)
     };
 
-    let marker_file = JobState::job_file_path(&config.output_dir);
-
-    log::debug!("Marker file: {:?}", marker_file);
-
     if !config.quiet {
         if config.resume {
             writeln!(
