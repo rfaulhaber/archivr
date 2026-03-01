@@ -496,12 +496,12 @@ pub struct PostRenderer<'a> {
 
 impl<'a> PostRenderer<'a> {
     /// Creates a new renderer with the default template
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         Self::with_template(DEFAULT_TEMPLATE)
     }
 
     /// Creates a new renderer with a custom template string
-    pub fn with_template(template_source: &'static str) -> Self {
+    pub fn with_template(template_source: &'static str) -> anyhow::Result<Self> {
         let mut env = Environment::new();
 
         // Add the render_block function
@@ -509,15 +509,12 @@ impl<'a> PostRenderer<'a> {
             render_block_from_value(&block)
         });
 
-        env.add_template("post", template_source)
-            .unwrap_or_else(|e| {
-                log::error!("Failed to add template: {}", e);
-            });
+        env.add_template("post", template_source)?;
 
-        Self {
+        Ok(Self {
             env,
             template_name: "post",
-        }
+        })
     }
 
     /// Creates a new renderer loading a template from a file
@@ -526,7 +523,7 @@ impl<'a> PostRenderer<'a> {
         // We need to leak the string to get a 'static lifetime
         // This is acceptable since templates are typically loaded once
         let leaked: &'static str = Box::leak(template_source.into_boxed_str());
-        Ok(Self::with_template(leaked))
+        Self::with_template(leaked)
     }
 
     /// Renders a post to HTML
@@ -546,9 +543,14 @@ impl<'a> PostRenderer<'a> {
     }
 }
 
-impl Default for PostRenderer<'_> {
-    fn default() -> Self {
-        Self::new()
+impl PostRenderer<'_> {
+    /// Creates a new renderer with the default template.
+    ///
+    /// # Panics
+    /// Panics if the built-in default template fails to parse (should never happen).
+    #[allow(clippy::expect_used)]
+    pub fn default_renderer() -> Self {
+        Self::new().expect("built-in default template failed to parse")
     }
 }
 
@@ -816,7 +818,8 @@ mod tests {
 
     #[test]
     fn test_post_renderer_default() {
-        let renderer = PostRenderer::new();
-        assert_eq!(renderer.template_name, "post");
+        let renderer = PostRenderer::new().ok();
+        assert!(renderer.is_some());
+        assert_eq!(renderer.map(|r| r.template_name), Some("post"));
     }
 }

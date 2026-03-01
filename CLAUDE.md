@@ -30,20 +30,20 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 
 There is no `src/` directory in this project. All the Rust source files start at the top level.
 
-- `main.rs` - CLI entry point, authentication flow, backup orchestration (full and incremental)
+- `main.rs` - CLI entry point, authentication flow, backup orchestration
 - `lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `cmd.rs` - CLI argument definitions using clap derive
 - `config.rs` - Configuration file deserialization and CLI args resolution into `ResolvedConfig`
 - `auth.rs` - Authentication: token storage, expiry checking, refresh-on-expiry, CSRF verification, interactive OAuth flow
-- `job.rs` - `JobState` (in-progress backup pagination) and `LastRun` (incremental backup marker)
+- `job.rs` - `JobState` (in-progress backup pagination and persisted job parameters for `--resume`)
 
 The OAuth flow uses a local TCP server on port 6263 to capture the callback. Authentication tokens are persisted to `{data_local_dir}/archivr/auth.json` using the `directories` crate.
 
 The `crabrave` library handles Tumblr API interactions.
 
-### Incremental backups
+### Resumable backups
 
-`--incremental` mode uses a `.archivr-last-run.json` marker file in the output directory to track the newest post timestamp from the last successful run. On incremental runs, the backup loop stops as soon as it encounters a post at or before that timestamp. The marker is saved after every successful backup (full or incremental) so switching between modes works seamlessly.
+`--resume` mode uses a `.archivr-job.json` file in the output directory to persist pagination state and the original job parameters (filters, output format, etc.). On resume, these saved parameters are restored so the backup continues with the same query regardless of the current CLI flags.
 
 ## Strict Linting Rules
 

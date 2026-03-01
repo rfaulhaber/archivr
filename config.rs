@@ -30,7 +30,10 @@ pub struct ResolvedConfig {
 
 impl ResolvedConfig {
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
-        fn get_timestamp(timestamp_str: Option<String>) -> Option<i64> {
+        fn get_timestamp(
+            flag: &str,
+            timestamp_str: Option<String>,
+        ) -> anyhow::Result<Option<i64>> {
             match timestamp_str {
                 Some(timestamp) => {
                     let from_datetime = chrono::DateTime::parse_from_rfc3339(&timestamp).ok();
@@ -43,8 +46,16 @@ impl ResolvedConfig {
                     from_datetime
                         .map(|val| val.timestamp())
                         .or_else(|| from_timestamp.map(|val| val.timestamp()))
+                        .map(Some)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Invalid value for {flag}: '{timestamp}'. \
+                                 Expected a Unix timestamp or RFC3339 date \
+                                 (e.g. 1700000000 or 2023-11-14T00:00:00Z)"
+                            )
+                        })
                 }
-                None => None,
+                None => Ok(None),
             }
         }
 
@@ -85,8 +96,8 @@ impl ResolvedConfig {
             resume: args.resume,
             quiet: args.quiet,
             reauth: args.reauth,
-            before: get_timestamp(args.before),
-            after: get_timestamp(args.after),
+            before: get_timestamp("--before", args.before)?,
+            after: get_timestamp("--after", args.after)?,
             cookies_file: args.cookies_file,
             dashboard: args.dashboard,
         })

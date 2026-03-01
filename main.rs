@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
     } else if let Some(ref template_path) = config.template_path {
         Some(PostRenderer::from_file(template_path)?)
     } else {
-        Some(PostRenderer::new())
+        Some(PostRenderer::new()?)
     };
 
     if !config.quiet {
@@ -167,12 +167,17 @@ async fn run_backup(
         let post_response = post_builder.send().await;
 
         if let Err(crabrave::CrabError::RateLimit { retry_after }) = post_response {
-            let retry_after = match retry_after {
-                Some(i) => format!("Hit rate limit. Retry after {i} seconds"),
-                None => "Hit rate limit, please retry later.".into(),
+            let msg = match retry_after {
+                Some(i) => format!(
+                    "Hit rate limit. Retry after {i} seconds. \
+                     Use --resume to continue from where you left off."
+                ),
+                None => "Hit rate limit, please retry later. \
+                         Use --resume to continue from where you left off."
+                    .into(),
             };
 
-            return Err(anyhow::anyhow!(retry_after));
+            return Err(anyhow::anyhow!(msg));
         }
 
         let post_response = post_response?;
