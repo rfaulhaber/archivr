@@ -1,7 +1,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
-use crate::PostTimestamp;
+use crate::{PostTimestamp, ResolvedConfig};
 
 pub const JOB_FILE_PATH: &str = ".archivr-job.json";
 
@@ -10,14 +10,32 @@ pub struct JobState {
     pub blog_name: String,
     pub offset: u64,
     pub started_at: PostTimestamp,
+    #[serde(default)]
+    pub before: Option<PostTimestamp>,
+    #[serde(default)]
+    pub after: Option<PostTimestamp>,
+    #[serde(default)]
+    pub json: bool,
+    #[serde(default)]
+    pub directories: bool,
+    #[serde(default)]
+    pub save_images: bool,
+    #[serde(default)]
+    pub template_path: Option<Utf8PathBuf>,
 }
 
 impl JobState {
-    pub fn new(blog_name: &str) -> Self {
+    pub fn new(config: &ResolvedConfig) -> Self {
         Self {
-            blog_name: blog_name.to_owned(),
+            blog_name: config.blog_name.clone(),
             offset: 0,
             started_at: chrono::Utc::now().timestamp(),
+            before: config.before,
+            after: config.after,
+            json: config.json,
+            directories: config.directories,
+            save_images: config.save_images,
+            template_path: config.template_path.clone(),
         }
     }
 

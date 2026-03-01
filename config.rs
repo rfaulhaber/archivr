@@ -1,7 +1,7 @@
 use camino::Utf8PathBuf;
 use serde::Deserialize;
 
-use crate::{ArchivrError, Args, PostTimestamp};
+use crate::{ArchivrError, Args, JobState, PostTimestamp};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -90,5 +90,14 @@ impl ResolvedConfig {
             cookies_file: args.cookies_file,
             dashboard: args.dashboard,
         })
+    }
+
+    pub fn apply_job_state(&mut self, job: &JobState) {
+        self.before = job.before;
+        self.after = job.after;
+        self.json = job.json;
+        self.directories = job.directories;
+        self.save_images = job.save_images;
+        self.template_path = job.template_path.clone();
     }
 }

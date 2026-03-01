@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     log::debug!("args: {:?}", args);
 
-    let config = ResolvedConfig::from_args(args)?;
+    let mut config = ResolvedConfig::from_args(args)?;
 
     let project_dir = directories::ProjectDirs::from(PROJECT_QUALIFIER, "", PROJECT_NAME)
         .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?;
@@ -41,19 +41,53 @@ async fn main() -> anyhow::Result<()> {
         fs_err::create_dir_all(&config.output_dir)?;
     }
 
+    let job_file = JobState::job_file_path(&config.output_dir);
+    let mut job = if config.resume {
+        JobState::load(&job_file).unwrap_or_else(|_| JobState::new(&config))
+    } else {
+        JobState::new(&config)
+    };
+
+    if config.resume && fs_err::exists(&job_file).unwrap_or(false) {
+        config.apply_job_state(&job);
+        let mut params = Vec::new();
+        if job.json {
+            params.push("--json".to_owned());
+        }
+        if job.directories {
+            params.push("--directories".to_owned());
+        }
+        if job.save_images {
+            params.push("--save-images".to_owned());
+        }
+        if let Some(before) = job.before {
+            params.push(format!("--before {before}"));
+        }
+        if let Some(after) = job.after {
+            params.push(format!("--after {after}"));
+        }
+        if let Some(ref tpl) = job.template_path {
+            params.push(format!("--template {tpl}"));
+        }
+        if !config.quiet {
+            if params.is_empty() {
+                writeln!(std::io::stdout(), "Resuming with default parameters")?;
+            } else {
+                writeln!(
+                    std::io::stdout(),
+                    "Resuming with saved parameters: {}",
+                    params.join(" ")
+                )?;
+            }
+        }
+    }
+
     let renderer = if config.json {
         None
     } else if let Some(ref template_path) = config.template_path {
         Some(PostRenderer::from_file(template_path)?)
     } else {
         Some(PostRenderer::new())
-    };
-
-    let job_file = JobState::job_file_path(&config.output_dir);
-    let mut job = if config.resume {
-        JobState::load(&job_file).unwrap_or_else(|_| JobState::new(&config.blog_name))
-    } else {
-        JobState::new(&config.blog_name)
     };
 
     if !config.quiet {
