@@ -2,6 +2,11 @@
 name = "archivr"
 version = "0.1.0"
 edition = "2024"
+description = "A Tumblr backup tool"
+license = "GPL-3.0"
+repository = "https://github.com/ryanfaulhaber/archivr"
+keywords = ["tumblr", "backup", "archive"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "archivr"
@@ -25,7 +30,7 @@ open = "5.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.49", features = ["full"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10"
 url = "2"

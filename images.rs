@@ -212,3 +212,225 @@ mod hex {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crabrave::handlers::blog::{Post, TrailItem};
+    use crabrave::npf::MediaObject;
+
+    fn make_media(url: &str, has_original: Option<bool>) -> MediaObject {
+        MediaObject {
+            url: url.to_owned(),
+            media_type: None,
+            media_key: None,
+            identifier: None,
+            width: None,
+            height: None,
+            original_dimensions_missing: None,
+            cropped: None,
+            has_original_dimensions: has_original,
+            colors: None,
+            exif: None,
+        }
+    }
+
+    fn make_post(content: Vec<ContentBlock>, trail: Vec<TrailItem>) -> Post {
+        // Build a minimal Post via JSON deserialization
+        let json = serde_json::json!({
+            "id_string": "123",
+            "blog_name": "test",
+            "post_url": "https://test.tumblr.com/post/123",
+            "type": "text",
+            "timestamp": 1700000000,
+            "scheduled_publish_time": 0,
+            "note_count": 0,
+            "reblog_key": "abc",
+            "is_blocks_post_format": true,
+            "followed": false,
+            "liked": false,
+            "can_like": false,
+            "can_reblog": false,
+            "can_reply": false,
+            "can_send_in_message": false,
+            "can_mute": false,
+            "display_avatar": false,
+            "interactability_reblog": "",
+            "is_blazed": false,
+            "is_blaze_pending": false,
+            "can_ignite": false,
+            "can_blaze": false,
+            "muted": false,
+            "mute_end_timestamp": 0,
+            "content": [],
+            "trail": [],
+            "tags": [],
+            "layout": []
+        });
+        let mut post: Post = serde_json::from_value(json).unwrap();
+        post.content = content;
+        post.trail = trail;
+        post
+    }
+
+    #[test]
+    fn collect_image_urls_from_content() {
+        let post = make_post(
+            vec![ContentBlock::Image {
+                media: vec![
+                    make_media("https://cdn.tumblr.com/small.jpg", None),
+                    make_media("https://cdn.tumblr.com/original.jpg", Some(true)),
+                ],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+
+        let urls = collect_image_urls(&post);
+        assert_eq!(urls.len(), 1);
+        // Should prefer the original-dimensions image
+        assert_eq!(urls[0], "https://cdn.tumblr.com/original.jpg");
+    }
+
+    #[test]
+    fn collect_image_urls_falls_back_to_first() {
+        let post = make_post(
+            vec![ContentBlock::Image {
+                media: vec![make_media("https://cdn.tumblr.com/only.jpg", None)],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+
+        let urls = collect_image_urls(&post);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://cdn.tumblr.com/only.jpg");
+    }
+
+    #[test]
+    fn collect_image_urls_skips_empty_media() {
+        let post = make_post(
+            vec![ContentBlock::Image {
+                media: vec![],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+
+        assert!(collect_image_urls(&post).is_empty());
+    }
+
+    #[test]
+    fn collect_image_urls_includes_trail() {
+        let trail = vec![TrailItem {
+            content: vec![ContentBlock::Image {
+                media: vec![make_media("https://cdn.tumblr.com/trail.jpg", Some(true))],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            content_raw: None,
+            layout: vec![],
+            post: None,
+            blog: None,
+            is_root_item: false,
+        }];
+
+        let post = make_post(vec![], trail);
+        let urls = collect_image_urls(&post);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://cdn.tumblr.com/trail.jpg");
+    }
+
+    #[test]
+    fn collect_image_urls_ignores_non_image_blocks() {
+        let post = make_post(
+            vec![ContentBlock::Text {
+                text: "hello".to_owned(),
+                subtype: None,
+                formatting: None,
+            }],
+            vec![],
+        );
+
+        assert!(collect_image_urls(&post).is_empty());
+    }
+
+    #[test]
+    fn local_filename_deterministic() {
+        let url = "https://64.media.tumblr.com/abc123/s540x810/image.jpg";
+        let a = local_filename_for_url(url);
+        let b = local_filename_for_url(url);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn local_filename_contains_original_name() {
+        let filename = local_filename_for_url("https://example.com/path/to/photo.png");
+        assert!(filename.ends_with("_photo.png"));
+    }
+
+    #[test]
+    fn local_filename_strips_query_params() {
+        let filename = local_filename_for_url("https://example.com/img.jpg?width=500&quality=80");
+        assert!(filename.ends_with("_img.jpg"));
+    }
+
+    #[test]
+    fn local_filename_different_urls_different_hashes() {
+        let a = local_filename_for_url("https://example.com/a.jpg");
+        let b = local_filename_for_url("https://example.com/b.jpg");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rewrite_post_image_urls_no_map() {
+        let post = make_post(
+            vec![ContentBlock::Image {
+                media: vec![make_media("https://cdn.tumblr.com/img.jpg", Some(true))],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+
+        let result = rewrite_post_image_urls(&post, &HashMap::new());
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn rewrite_post_image_urls_with_map() {
+        let post = make_post(
+            vec![ContentBlock::Image {
+                media: vec![make_media("https://cdn.tumblr.com/img.jpg", Some(true))],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+
+        let mut url_map = HashMap::new();
+        url_map.insert(
+            "https://cdn.tumblr.com/img.jpg".to_owned(),
+            "media/images/local.jpg".to_owned(),
+        );
+
+        let result = rewrite_post_image_urls(&post, &url_map);
+        assert!(matches!(result, Cow::Owned(_)));
+
+        if let ContentBlock::Image { media, .. } = &result.content[0] {
+            assert_eq!(media[0].url, "media/images/local.jpg");
+        } else {
+            panic!("expected Image block");
+        }
+    }
+}

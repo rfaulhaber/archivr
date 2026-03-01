@@ -69,12 +69,12 @@ impl ResolvedConfig {
         let consumer_key = args
             .consumer_key
             .or_else(|| config.as_ref().and_then(|c| c.consumer_key.clone()))
-            .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
+            .ok_or(ArchivrError::NoConsumerKey)?;
 
         let consumer_secret = args
             .consumer_secret
             .or_else(|| config.as_ref().and_then(|c| c.consumer_secret.clone()))
-            .ok_or(ArchivrError::NoConsumerKeyAndSecret)?;
+            .ok_or(ArchivrError::NoConsumerSecret)?;
 
         let output_dir = match args.output_dir {
             Some(dir) => dir,
@@ -110,5 +110,128 @@ impl ResolvedConfig {
         self.directories = job.directories;
         self.save_images = job.save_images;
         self.template_path = job.template_path.clone();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::Args;
+
+    fn base_args() -> Args {
+        Args {
+            blog_name: "testblog".to_owned(),
+            consumer_key: Some("key".to_owned()),
+            consumer_secret: Some("secret".to_owned()),
+            config_file: None,
+            resume: false,
+            template: None,
+            directories: false,
+            save_images: false,
+            json: false,
+            output_dir: Some(Utf8PathBuf::from("/tmp/test-output")),
+            before: None,
+            after: None,
+            quiet: false,
+            reauth: false,
+            cookies_file: None,
+            dashboard: false,
+        }
+    }
+
+    #[test]
+    fn from_args_basic() {
+        let config = ResolvedConfig::from_args(base_args()).unwrap();
+        assert_eq!(config.blog_name, "testblog");
+        assert_eq!(config.consumer_key, "key");
+        assert_eq!(config.consumer_secret, "secret");
+        assert_eq!(config.output_dir, Utf8PathBuf::from("/tmp/test-output"));
+    }
+
+    #[test]
+    fn from_args_missing_consumer_key() {
+        let mut args = base_args();
+        args.consumer_key = None;
+        let result = ResolvedConfig::from_args(args);
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Consumer key"));
+    }
+
+    #[test]
+    fn from_args_missing_consumer_secret() {
+        let mut args = base_args();
+        args.consumer_secret = None;
+        let result = ResolvedConfig::from_args(args);
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Consumer secret"));
+    }
+
+    #[test]
+    fn timestamp_parsing_unix() {
+        let mut args = base_args();
+        args.before = Some("1700000000".to_owned());
+        let config = ResolvedConfig::from_args(args).unwrap();
+        assert_eq!(config.before, Some(1700000000));
+    }
+
+    #[test]
+    fn timestamp_parsing_rfc3339() {
+        let mut args = base_args();
+        args.after = Some("2023-11-14T00:00:00Z".to_owned());
+        let config = ResolvedConfig::from_args(args).unwrap();
+        assert_eq!(config.after, Some(1699920000));
+    }
+
+    #[test]
+    fn timestamp_parsing_invalid() {
+        let mut args = base_args();
+        args.before = Some("not-a-date".to_owned());
+        let result = ResolvedConfig::from_args(args);
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("Invalid value for --before"));
+    }
+
+    #[test]
+    fn timestamp_parsing_none() {
+        let config = ResolvedConfig::from_args(base_args()).unwrap();
+        assert_eq!(config.before, None);
+        assert_eq!(config.after, None);
+    }
+
+    #[test]
+    fn output_dir_defaults_to_blog_name() {
+        let mut args = base_args();
+        args.output_dir = None;
+        let config = ResolvedConfig::from_args(args).unwrap();
+        // Should end with the blog name
+        assert!(config.output_dir.as_str().ends_with("testblog"));
+    }
+
+    #[test]
+    fn apply_job_state_overrides_config() {
+        let mut config = ResolvedConfig::from_args(base_args()).unwrap();
+        let job = JobState {
+            blog_name: "other".to_owned(),
+            offset: 100,
+            started_at: 1700000000,
+            before: Some(1700001000),
+            after: Some(1699999000),
+            json: true,
+            directories: true,
+            save_images: true,
+            template_path: Some(Utf8PathBuf::from("custom.html")),
+        };
+
+        config.apply_job_state(&job);
+        assert_eq!(config.before, Some(1700001000));
+        assert_eq!(config.after, Some(1699999000));
+        assert!(config.json);
+        assert!(config.directories);
+        assert!(config.save_images);
+        assert_eq!(
+            config.template_path,
+            Some(Utf8PathBuf::from("custom.html"))
+        );
     }
 }

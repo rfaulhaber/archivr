@@ -26,8 +26,10 @@ pub enum ArchivrError {
     MalformedCallback,
     #[error("Error from OAuth: {0}")]
     OAuth(String),
-    #[error("Consumer key and secret not specified")]
-    NoConsumerKeyAndSecret,
+    #[error("Consumer key not specified (use --consumer-key or set it in the config file)")]
+    NoConsumerKey,
+    #[error("Consumer secret not specified (use --consumer-secret or set it in the config file)")]
+    NoConsumerSecret,
     #[error("CSRF state mismatch: expected {expected}, got {actual}")]
     CsrfMismatch { expected: String, actual: String },
 }
@@ -58,6 +60,7 @@ pub async fn capture_callback() -> anyhow::Result<(String, Option<String>)> {
     Ok(code_and_state)
 }
 
+/// Parses the authorization code and optional state from an OAuth callback HTTP request line.
 fn parse_code_from_request(request_line: &str) -> anyhow::Result<(String, Option<String>)> {
     let path = request_line
         .split_whitespace()
@@ -86,4 +89,52 @@ fn parse_code_from_request(request_line: &str) -> anyhow::Result<(String, Option
 
     let code = code.ok_or(ArchivrError::MalformedCallback)?;
     Ok((code, state))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_callback_with_code_and_state() {
+        let request = "GET /redirect?code=abc123&state=csrf_token HTTP/1.1";
+        let (code, state) = parse_code_from_request(request).unwrap();
+        assert_eq!(code, "abc123");
+        assert_eq!(state.as_deref(), Some("csrf_token"));
+    }
+
+    #[test]
+    fn parse_callback_code_only() {
+        let request = "GET /redirect?code=mycode HTTP/1.1";
+        let (code, state) = parse_code_from_request(request).unwrap();
+        assert_eq!(code, "mycode");
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn parse_callback_url_encoded_values() {
+        let request = "GET /redirect?code=has%20space&state=a%26b HTTP/1.1";
+        let (code, state) = parse_code_from_request(request).unwrap();
+        assert_eq!(code, "has space");
+        assert_eq!(state.as_deref(), Some("a&b"));
+    }
+
+    #[test]
+    fn parse_callback_error_response() {
+        let request = "GET /redirect?error=access_denied HTTP/1.1";
+        let err = parse_code_from_request(request).unwrap_err();
+        assert!(err.to_string().contains("access_denied"));
+    }
+
+    #[test]
+    fn parse_callback_malformed_request() {
+        assert!(parse_code_from_request("GARBAGE").is_err());
+    }
+
+    #[test]
+    fn parse_callback_no_query_string() {
+        // No code parameter → MalformedCallback
+        assert!(parse_code_from_request("GET /redirect HTTP/1.1").is_err());
+    }
 }

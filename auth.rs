@@ -238,8 +238,8 @@ pub async fn authenticate(
                         dashboard,
                     );
                 }
-                Err(_e) => {
-                    log::warn!("token refresh failed, falling back to interactive auth");
+                Err(e) => {
+                    log::warn!("token refresh failed: {e}, falling back to interactive auth");
                 }
             }
         }

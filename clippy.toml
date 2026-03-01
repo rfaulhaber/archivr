@@ -6,18 +6,6 @@
 # AWAIT POINTS - let's avoid deadlocks
 # =============================================================================
 
-[[await-holding-invalid-types]]
-path = "generational_box::GenerationalRef"
-reason = "Reads should not be held over an await point"
-
-[[await-holding-invalid-types]]
-path = "generational_box::GenerationalRefMut"
-reason = "Write should not be held over an await point"
-
-[[await-holding-invalid-types]]
-path = "dioxus_signals::WriteLock"
-reason = "Write should not be held over an await point"
-
 # Async locks - use message passing instead
 [[disallowed-types]]
 path = "tokio::sync::Mutex"
