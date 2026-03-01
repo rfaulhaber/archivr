@@ -2,6 +2,24 @@
 
 A Tumblr backup tool.
 
+## Installing
+
+At present, I don't have binary distributions available. You must either use `cargo install`, Nix, or compile the binary yourself.
+
+With `cargo`, you can run
+
+```sh
+cargo install archivr
+```
+
+This repository also provides a Nix flake. You can run the command by using:
+
+```sh
+# or `nix shell` to add it to a shell
+nix run https://codeberg.org/ryf/archivr
+```
+
+You can also add it to your Nix configuration that way.
 
 ## Prerequisites
 
