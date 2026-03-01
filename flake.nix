@@ -1,5 +1,5 @@
 {
-  description = "Rust flake template using rust-overlay and flake-parts.";
+  description = "A Tumblr backup tool.";
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
@@ -15,7 +15,7 @@
     flake-parts,
     ...
   }: let
-    projectName = "CHANGEME";
+    projectName = "archivr";
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [];
@@ -57,7 +57,6 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust-bin.stable.latest.default
-            clippy
             rust-analyzer
             cargo-nextest
           ];
