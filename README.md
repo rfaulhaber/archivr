@@ -4,7 +4,9 @@ A Tumblr backup tool.
 
 ## Installing
 
-At present, I don't have binary distributions available. You must either use `cargo install`, Nix, or compile the binary yourself.
+Binary distributions are available at the [GitHub Actions "Build" job](https://github.com/rfaulhaber/archivr/actions).
+
+You may also use `cargo install`, Nix, or compile the binary yourself.
 
 With `cargo`, you can run
 
