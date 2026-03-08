@@ -26,6 +26,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -43,15 +45,16 @@ jobs:
         if: matrix.use_cross
         uses: taiki-e/install-action@cross
 
-      - name: Build
-        run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
 
-      - name: Prepare artifact
+      - name: Build
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact (unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/archivr dist/
@@ -59,11 +62,20 @@ jobs:
           tar czf archivr-${{ matrix.target }}.tar.gz archivr
           rm archivr
 
+      - name: Prepare artifact (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/archivr.exe" dist/
+          Compress-Archive -Path dist/archivr.exe -DestinationPath "dist/archivr-${{ matrix.target }}.zip"
+          Remove-Item dist/archivr.exe
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: archivr-${{ matrix.target }}
-          path: dist/archivr-${{ matrix.target }}.tar.gz
+          path: dist/archivr-${{ matrix.target }}.*
 
   release:
     name: Release
