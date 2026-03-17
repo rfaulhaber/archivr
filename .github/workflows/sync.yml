@@ -16,6 +16,6 @@ jobs:
           git clone --bare https://codeberg.org/ryf/archivr.git repo
           cd repo
           git push --force --prune \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/ryanfaulhaber/archivr.git" \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/rfaulhaber/archivr.git" \
             "refs/heads/*:refs/heads/*" \
             "refs/tags/*:refs/tags/*"
