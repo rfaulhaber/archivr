@@ -94,3 +94,48 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/*
+
+  codeberg-release:
+    name: Upload to Codeberg Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload to Codeberg release
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          REPO="ryf/archivr"
+          API="https://codeberg.org/api/v1"
+
+          # Get existing release or create one
+          RELEASE_ID=$(curl -sf \
+            -H "Authorization: token ${CODEBERG_TOKEN}" \
+            "${API}/repos/${REPO}/releases/tags/${TAG}" \
+            | jq -r '.id // empty')
+
+          if [ -z "$RELEASE_ID" ]; then
+            RELEASE_ID=$(curl -sf -X POST \
+              -H "Authorization: token ${CODEBERG_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"tag_name\": \"${TAG}\", \"name\": \"${TAG}\"}" \
+              "${API}/repos/${REPO}/releases" \
+              | jq -r '.id')
+          fi
+
+          # Upload each artifact
+          for file in artifacts/*; do
+            filename=$(basename "$file")
+            echo "Uploading ${filename}..."
+            curl -sf -X POST \
+              -H "Authorization: token ${CODEBERG_TOKEN}" \
+              -F "attachment=@${file}" \
+              "${API}/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${filename}"
+          done
