@@ -84,4 +84,10 @@ pub struct Args {
         help = "Use Tumblr's internal dashboard API instead of the public API. Requires --cookies-file. Enables access to dashboard-only blogs"
     )]
     pub dashboard: bool,
+
+    #[arg(
+        long,
+        help = "Use manual authentication flow for environments without a browser (e.g. servers, containers). You will be prompted to paste the redirect URL after authenticating"
+    )]
+    pub headless: bool,
 }

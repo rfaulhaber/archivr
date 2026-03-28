@@ -68,6 +68,25 @@ This will kick off a job to back up an entire blog.
 | `--reauth` | | Force re-authentication, ignoring saved tokens |
 | `--cookies-file` | | Path to a Netscape/Mozilla-format cookies file for dashboard access |
 | `--dashboard` | | Use Tumblr's internal dashboard API (requires `--cookies-file`) |
+| `--headless` | | Manual auth flow for environments without a browser (servers, containers) |
+
+### Headless / server usage
+
+When running archivr on a remote server, in a container, or anywhere without a browser, the default OAuth flow won't work because the `localhost` redirect can't reach your machine. Use `--headless` to authenticate manually:
+
+```sh
+archivr my-blog --consumer-key KEY --consumer-secret SECRET --headless
+```
+
+This will:
+
+1. Print an authorization URL
+2. You open that URL in a browser on any machine and authorize with Tumblr
+3. Tumblr redirects your browser to `http://localhost:6263/redirect?code=...` — the page will fail to load, but the full URL will be visible in your browser's address bar
+4. Copy the URL from the address bar and paste it into the terminal
+5. archivr extracts the authorization code and completes authentication
+
+The resulting token is saved to disk, so subsequent runs don't need `--headless` again unless the token expires and can't be refreshed.
 
 ### Job config file
 

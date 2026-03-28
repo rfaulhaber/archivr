@@ -87,6 +87,7 @@ async fn interactive_auth(
     auth_file_path: &Utf8Path,
     cookie_jar: Option<Arc<CookieJar>>,
     dashboard: bool,
+    headless: bool,
 ) -> anyhow::Result<Crabrave> {
     let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
     let (auth_url, csrf_token) = oauth_config.authorize_url();
@@ -97,12 +98,16 @@ async fn interactive_auth(
         "Please navigate to this URL to authenticate:\n  {auth_url}"
     )?;
 
-    match open::that(auth_url.as_str()) {
-        Ok(()) => log::debug!("opened browser for authentication"),
-        Err(_e) => log::debug!("could not open browser automatically"),
-    }
-
-    let (code, state) = crate::capture_callback().await?;
+    let (code, state) = if headless {
+        let url = crate::read_callback_url_from_stdin()?;
+        crate::parse_code_from_url(&url)?
+    } else {
+        match open::that(auth_url.as_str()) {
+            Ok(()) => log::debug!("opened browser for authentication"),
+            Err(_e) => log::debug!("could not open browser automatically"),
+        }
+        crate::capture_callback().await?
+    };
 
     // Verify CSRF state parameter
     match state {
@@ -184,6 +189,7 @@ pub async fn authenticate(
     reauth: bool,
     cookies_file: Option<&Utf8Path>,
     dashboard: bool,
+    headless: bool,
 ) -> anyhow::Result<Crabrave> {
     fs_err::create_dir_all(data_dir)?;
     let auth_file_path = data_dir.join("auth.json");
@@ -197,6 +203,7 @@ pub async fn authenticate(
             &auth_file_path,
             cookie_jar,
             dashboard,
+            headless,
         )
         .await;
     }
@@ -251,6 +258,7 @@ pub async fn authenticate(
         &auth_file_path,
         cookie_jar,
         dashboard,
+        headless,
     )
     .await
 }

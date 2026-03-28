@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         config.reauth,
         config.cookies_file.as_deref(),
         config.dashboard,
+        config.headless,
     )
     .await?;
 

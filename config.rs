@@ -26,6 +26,7 @@ pub struct ResolvedConfig {
     pub after: Option<PostTimestamp>,
     pub cookies_file: Option<Utf8PathBuf>,
     pub dashboard: bool,
+    pub headless: bool,
 }
 
 impl ResolvedConfig {
@@ -100,6 +101,7 @@ impl ResolvedConfig {
             after: get_timestamp("--after", args.after)?,
             cookies_file: args.cookies_file,
             dashboard: args.dashboard,
+            headless: args.headless,
         })
     }
 
@@ -137,6 +139,7 @@ mod tests {
             reauth: false,
             cookies_file: None,
             dashboard: false,
+            headless: false,
         }
     }
 
