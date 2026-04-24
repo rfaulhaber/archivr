@@ -56,7 +56,7 @@ pub struct Args {
 
     #[arg(
         long,
-        help = "Retrieve all posts before this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date",
+        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp prefixed with '@' or as an RFC3339-formatted date/datetime",
         value_name = "DATE",
         value_parser = parse_date
     )]
@@ -64,11 +64,11 @@ pub struct Args {
 
     #[arg(
         long,
-        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date",
+        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp prefixed with '@' or as an RFC3339-formatted date/datetime",
         value_name = "DATE",
         value_parser = parse_date
     )]
-    pub after: Option<i64>, // TODO make date
+    pub after: Option<i64>,
 
     #[arg(short, long, help = "Suppress progress output")]
     pub quiet: bool,
