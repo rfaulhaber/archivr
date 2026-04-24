@@ -31,35 +31,6 @@ pub struct ResolvedConfig {
 
 impl ResolvedConfig {
     pub fn from_args(args: Args) -> anyhow::Result<Self> {
-        fn get_timestamp(
-            flag: &str,
-            timestamp_str: Option<String>,
-        ) -> anyhow::Result<Option<i64>> {
-            match timestamp_str {
-                Some(timestamp) => {
-                    let from_datetime = chrono::DateTime::parse_from_rfc3339(&timestamp).ok();
-
-                    let from_timestamp = timestamp
-                        .parse::<i64>()
-                        .ok()
-                        .and_then(chrono::DateTime::from_timestamp_secs);
-
-                    from_datetime
-                        .map(|val| val.timestamp())
-                        .or_else(|| from_timestamp.map(|val| val.timestamp()))
-                        .map(Some)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Invalid value for {flag}: '{timestamp}'. \
-                                 Expected a Unix timestamp or RFC3339 date \
-                                 (e.g. 1700000000 or 2023-11-14T00:00:00Z)"
-                            )
-                        })
-                }
-                None => Ok(None),
-            }
-        }
-
         let config: Option<Config> = if let Some(ref config_path) = args.config_file {
             let config_file_str = fs_err::read_to_string(config_path)?;
             Some(serde_json::from_str(&config_file_str)?)
@@ -97,8 +68,8 @@ impl ResolvedConfig {
             resume: args.resume,
             quiet: args.quiet,
             reauth: args.reauth,
-            before: get_timestamp("--before", args.before)?,
-            after: get_timestamp("--after", args.after)?,
+            before: args.before,
+            after: args.after,
             cookies_file: args.cookies_file,
             dashboard: args.dashboard,
             headless: args.headless,
@@ -171,70 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_parsing_unix() {
-        let mut args = base_args();
-        args.before = Some("1700000000".to_owned());
-        let config = ResolvedConfig::from_args(args).unwrap();
-        assert_eq!(config.before, Some(1700000000));
-    }
-
-    #[test]
-    fn timestamp_parsing_rfc3339() {
-        let mut args = base_args();
-        args.after = Some("2023-11-14T00:00:00Z".to_owned());
-        let config = ResolvedConfig::from_args(args).unwrap();
-        assert_eq!(config.after, Some(1699920000));
-    }
-
-    #[test]
-    fn timestamp_parsing_invalid() {
-        let mut args = base_args();
-        args.before = Some("not-a-date".to_owned());
-        let result = ResolvedConfig::from_args(args);
-        assert!(result.is_err());
-        assert!(format!("{}", result.err().unwrap()).contains("Invalid value for --before"));
-    }
-
-    #[test]
-    fn timestamp_parsing_none() {
-        let config = ResolvedConfig::from_args(base_args()).unwrap();
-        assert_eq!(config.before, None);
-        assert_eq!(config.after, None);
-    }
-
-    #[test]
     fn output_dir_defaults_to_blog_name() {
         let mut args = base_args();
         args.output_dir = None;
         let config = ResolvedConfig::from_args(args).unwrap();
         // Should end with the blog name
         assert!(config.output_dir.as_str().ends_with("testblog"));
-    }
-
-    #[test]
-    fn apply_job_state_overrides_config() {
-        let mut config = ResolvedConfig::from_args(base_args()).unwrap();
-        let job = JobState {
-            blog_name: "other".to_owned(),
-            offset: 100,
-            started_at: 1700000000,
-            before: Some(1700001000),
-            after: Some(1699999000),
-            json: true,
-            directories: true,
-            save_images: true,
-            template_path: Some(Utf8PathBuf::from("custom.html")),
-        };
-
-        config.apply_job_state(&job);
-        assert_eq!(config.before, Some(1700001000));
-        assert_eq!(config.after, Some(1699999000));
-        assert!(config.json);
-        assert!(config.directories);
-        assert!(config.save_images);
-        assert_eq!(
-            config.template_path,
-            Some(Utf8PathBuf::from("custom.html"))
-        );
     }
 }

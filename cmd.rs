@@ -56,15 +56,19 @@ pub struct Args {
 
     #[arg(
         long,
-        help = "Retrieve all posts before this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date"
+        help = "Retrieve all posts before this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date",
+        value_name = "DATE",
+        value_parser = parse_date
     )]
-    pub before: Option<String>, // TODO make date
+    pub before: Option<i64>,
 
     #[arg(
         long,
-        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date"
+        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp or as an RFC3339-formatted date",
+        value_name = "DATE",
+        value_parser = parse_date
     )]
-    pub after: Option<String>, // TODO make date
+    pub after: Option<i64>, // TODO make date
 
     #[arg(short, long, help = "Suppress progress output")]
     pub quiet: bool,
@@ -90,4 +94,52 @@ pub struct Args {
         help = "Use manual authentication flow for environments without a browser (e.g. servers, containers). You will be prompted to paste the redirect URL after authenticating"
     )]
     pub headless: bool,
+}
+
+fn parse_date(s: &str) -> Result<i64, String> {
+    if let Some(rest) = s.strip_prefix('@') {
+        return rest
+            .parse::<i64>()
+            .map_err(|e| format!("invalid unix timestamp `{s}`: {e}"));
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.timestamp());
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_str(s, "%Y-%m-%d") {
+        return Ok(dt.timestamp());
+    }
+
+    Err(format!(
+        "invalid date `{s}` (expected RFC 3339 like \
+         `2024-01-02T03:04:05Z`, a date `2024-01-02`, or `@<unix-seconds>`)"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_parsing_unix() {
+        let input = "@1700000000";
+        let expected = Ok(1700000000);
+        assert_eq!(parse_date(input), expected);
+    }
+
+    #[test]
+    fn timestamp_parsing_rfc3339() {
+        let input = "2023-11-14T00:00:00Z";
+        let expected = Ok(1699920000 as i64);
+        assert_eq!(parse_date(input), expected);
+    }
+
+    #[test]
+    fn timestamp_parsing_invalid() {
+        let input = "not-a-date";
+        let result = parse_date(input);
+        assert!(result.is_err());
+        assert!(format!("{}", result.err().unwrap()).contains("invalid date"));
+    }
 }
