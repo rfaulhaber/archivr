@@ -1,24 +1,22 @@
 name: Sync from Codeberg
 
+# Pulls all branches and tags from the Codeberg origin-of-truth and
+# pushes them to this GitHub mirror. Uses GH_PAT (not GITHUB_TOKEN)
+# so that new tags trigger the build workflow.
+
 on:
   schedule:
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  sync:
+  mirror:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync from Codeberg
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clone from Codeberg
+        run: git clone --bare https://codeberg.org/${{ vars.CODEBERG_REPO }}.git repo
+
+      - name: Push mirror to GitHub
         run: |
-          git clone --bare https://codeberg.org/ryf/archivr.git repo
           cd repo
-          git push --force --prune \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/rfaulhaber/archivr.git" \
-            "refs/heads/*:refs/heads/*" \
-            "refs/tags/*:refs/tags/*"
+          git push --mirror https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git

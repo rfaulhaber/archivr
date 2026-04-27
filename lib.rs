@@ -3,11 +3,13 @@ pub mod cmd;
 pub mod config;
 pub mod images;
 pub mod job;
+pub mod state;
 pub mod template;
 
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
 pub use job::JobState;
+pub use state::BackupState;
 pub use template::{DEFAULT_TEMPLATE, PostRenderer};
 
 use thiserror::Error;

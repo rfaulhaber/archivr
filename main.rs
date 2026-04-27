@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::io::Write;
 
 use archivr::{
-    Args, JobState, PostRenderer, ResolvedConfig, auth::authenticate,
+    Args, BackupState, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
     images::{collect_image_urls, download_images, rewrite_post_image_urls},
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
@@ -40,6 +40,40 @@ async fn main() -> anyhow::Result<()> {
 
     if !fs_err::exists(&config.output_dir)? {
         fs_err::create_dir_all(&config.output_dir)?;
+    }
+
+    let state_file = BackupState::state_file_path(&config.output_dir);
+    let prior_state = BackupState::load(&state_file).ok();
+
+    if config.incremental {
+        match prior_state.as_ref() {
+            Some(s) if s.blog_name == config.blog_name => {
+                config.after = Some(s.newest_post_timestamp);
+                if !config.quiet {
+                    writeln!(
+                        std::io::stdout(),
+                        "Incremental backup: fetching posts newer than {} (last archived post)",
+                        s.newest_post_timestamp
+                    )?;
+                }
+            }
+            Some(s) => {
+                return Err(anyhow::anyhow!(
+                    "state file at {} is for blog `{}`, but `{}` was requested",
+                    state_file,
+                    s.blog_name,
+                    config.blog_name
+                ));
+            }
+            None => {
+                if !config.quiet {
+                    writeln!(
+                        std::io::stdout(),
+                        "Incremental backup: no prior state found, performing a full backup to establish baseline"
+                    )?;
+                }
+            }
+        }
     }
 
     let job_file = JobState::job_file_path(&config.output_dir);
@@ -98,12 +132,32 @@ async fn main() -> anyhow::Result<()> {
                 "Backing up {} (resuming previous job)...",
                 config.blog_name
             )?;
+        } else if config.incremental && config.after.is_some() {
+            writeln!(
+                std::io::stdout(),
+                "Backing up {} (incremental)...",
+                config.blog_name
+            )?;
         } else {
             writeln!(std::io::stdout(), "Backing up {}...", config.blog_name)?;
         }
     }
 
-    run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
+    let newest_observed =
+        run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
+
+    if let Some(newest_ts) = newest_observed {
+        let prior_high_water = prior_state
+            .as_ref()
+            .map(|s| s.newest_post_timestamp)
+            .unwrap_or(0);
+        let new_state = BackupState {
+            blog_name: config.blog_name.clone(),
+            last_run_at: chrono::Utc::now().timestamp(),
+            newest_post_timestamp: newest_ts.max(prior_high_water),
+        };
+        new_state.save(&state_file)?;
+    }
 
     if fs_err::exists(&job_file)? {
         JobState::delete(&job_file)?;
@@ -146,9 +200,10 @@ async fn run_backup(
     renderer: Option<&PostRenderer<'_>>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<PostTimestamp>> {
     let mut posts_archived: u64 = 0;
     let mut buffered: Option<BufferedHtmlPost> = None;
+    let mut newest_observed: Option<PostTimestamp> = None;
 
     loop {
         let mut post_builder = client
@@ -188,6 +243,12 @@ async fn run_backup(
         }
 
         log::info!("({}) Fetching next batch of posts...", job.offset,);
+
+        if newest_observed.is_none() {
+            // Tumblr returns posts newest-first. The first post of the first
+            // non-empty batch is our high-water mark for incremental runs.
+            newest_observed = post_response.posts.iter().map(|p| p.timestamp).max();
+        }
 
         for post in &post_response.posts {
             log::info!("processing post {}", post.id);
@@ -277,5 +338,5 @@ async fn run_backup(
         finalize_buffered_post(&last, "<span></span>")?;
     }
 
-    Ok(())
+    Ok(newest_observed)
 }

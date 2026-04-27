@@ -64,6 +64,7 @@ This will kick off a job to back up an entire blog.
 | `--before` | | Only fetch posts before this date (Unix timestamp or RFC3339) |
 | `--after` | | Only fetch posts after this date (Unix timestamp or RFC3339) |
 | `--resume` | | Resume a previously interrupted backup |
+| `--incremental` | | Fetch only posts newer than the last successful backup |
 | `--quiet` | `-q` | Suppress progress output |
 | `--reauth` | | Force re-authentication, ignoring saved tokens |
 | `--cookies-file` | | Path to a Netscape/Mozilla-format cookies file for dashboard access |
@@ -87,6 +88,20 @@ This will:
 5. archivr extracts the authorization code and completes authentication
 
 The resulting token is saved to disk, so subsequent runs don't need `--headless` again unless the token expires and can't be refreshed.
+
+### Incremental backups
+
+After an initial full backup, you can keep an archive up to date by re-running with `--incremental`:
+
+```sh
+archivr my-blog --consumer-key KEY --consumer-secret SECRET --incremental
+```
+
+archivr records the timestamp of the newest post archived in `.archivr-state.json` (inside the output directory). On the next incremental run, only posts newer than that timestamp are fetched. The state file persists across runs and is updated on every successful backup.
+
+If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline.
+
+`--incremental` is mutually exclusive with `--resume` and `--after`. If a previous run was interrupted, finish it with `--resume` first, then run `--incremental` next time.
 
 ### Job config file
 
@@ -256,7 +271,6 @@ You can also selectively override rendering for specific block types:
 
 The following features are not yet implemented but are planned for future releases:
 
-- Incremental backups (only fetch posts newer than the last run)
 - Video and audio downloading (`--save-video`, `--save-audio`)
 - Liked posts backup (`--likes`)
 - Tag filtering (`--include-tags`)

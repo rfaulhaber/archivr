@@ -45,6 +45,10 @@ The `crabrave` library handles Tumblr API interactions.
 
 `--resume` mode uses a `.archivr-job.json` file in the output directory to persist pagination state and the original job parameters (filters, output format, etc.). On resume, these saved parameters are restored so the backup continues with the same query regardless of the current CLI flags.
 
+### Incremental backups
+
+`--incremental` mode uses a `.archivr-state.json` file in the output directory to persist the timestamp of the newest post archived in the last successful run. On the next incremental run, this timestamp is passed to the Tumblr API as the `after` filter so only newer posts are fetched. The state file outlives runs (unlike `.archivr-job.json`, which is deleted on success). First-time use with no prior state falls back to a full backup to establish the baseline. The flag conflicts with `--resume` and `--after`.
+
 ## Strict Linting Rules
 
 This project has aggressive clippy rules (`Cargo.toml` + `clippy.toml`):

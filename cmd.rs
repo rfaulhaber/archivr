@@ -31,6 +31,13 @@ pub struct Args {
     pub resume: bool,
 
     #[arg(
+        long,
+        conflicts_with_all = ["resume", "after"],
+        help = "Fetch only posts newer than the last successful backup. Falls back to a full backup if no prior state exists"
+    )]
+    pub incremental: bool,
+
+    #[arg(
         short,
         long,
         conflicts_with = "json",
@@ -118,6 +125,7 @@ fn parse_date(s: &str) -> Result<i64, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -131,7 +139,7 @@ mod tests {
     #[test]
     fn timestamp_parsing_rfc3339() {
         let input = "2023-11-14T00:00:00Z";
-        let expected = Ok(1699920000 as i64);
+        let expected = Ok(1699920000_i64);
         assert_eq!(parse_date(input), expected);
     }
 
@@ -140,6 +148,6 @@ mod tests {
         let input = "not-a-date";
         let result = parse_date(input);
         assert!(result.is_err());
-        assert!(format!("{}", result.err().unwrap()).contains("invalid date"));
+        assert!(result.err().unwrap().to_string().contains("invalid date"));
     }
 }
