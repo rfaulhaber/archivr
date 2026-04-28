@@ -293,9 +293,9 @@ dependencies = [
 
 [[package]]
 name = "crabrave"
-version = "0.8.1"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d3795c10686f000e18c693c7a06a87e4a40c36bdedc57f92a7bfc7348af969b"
+checksum = "3d594406a7104d6a3cb403cd13b27590b3e4e16894ad37cb87ef0482a046d06b"
 dependencies = [
  "camino",
  "fs-err",
