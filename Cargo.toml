@@ -7,6 +7,17 @@ license = "GPL-3.0"
 repository = "https://github.com/ryanfaulhaber/archivr"
 keywords = ["tumblr", "backup", "archive"]
 categories = ["command-line-utilities"]
+exclude = [
+    "/.github/",
+    "/.envrc",
+    "/.gitignore",
+    "/CLAUDE.md",
+    "/clippy.toml",
+    "/flake.lock",
+    "/flake.nix",
+    "/rust-toolchain.toml"
+]
+
 
 [[bin]]
 name = "archivr"
