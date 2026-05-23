@@ -19,13 +19,6 @@ exclude = [
 ]
 
 
-[[bin]]
-name = "archivr"
-path = "main.rs"
-
-[lib]
-path = "lib.rs"
-
 [dependencies]
 anyhow = "1"
 camino = { version = "1.2", features = ["serde1"] }
