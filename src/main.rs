@@ -77,13 +77,31 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let job_file = JobState::job_file_path(&config.output_dir);
-    let mut job = if config.resume {
-        JobState::load(&job_file).unwrap_or_else(|_| JobState::new(&config))
+    let resuming_existing_job = config.resume && fs_err::exists(&job_file).unwrap_or(false);
+    let mut job = if resuming_existing_job {
+        match JobState::load(&job_file) {
+            Ok(loaded) => {
+                if loaded.blog_name != config.blog_name {
+                    return Err(anyhow::anyhow!(
+                        "job file at {} is for blog `{}`, but `{}` was requested. \
+                         Resume from the matching output directory or omit --resume to start fresh.",
+                        job_file,
+                        loaded.blog_name,
+                        config.blog_name
+                    ));
+                }
+                loaded
+            }
+            Err(e) => {
+                log::warn!("failed to load job file ({e}); starting a new backup");
+                JobState::new(&config)
+            }
+        }
     } else {
         JobState::new(&config)
     };
 
-    if config.resume && fs_err::exists(&job_file).unwrap_or(false) {
+    if resuming_existing_job {
         config.apply_job_state(&job);
         let mut params = Vec::new();
         if job.json {
