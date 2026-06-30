@@ -59,6 +59,11 @@ async fn main() -> anyhow::Result<()> {
     if config.incremental {
         match prior_state.as_ref() {
             Some(s) if s.blog_name == config.blog_name => {
+                // Tumblr's `after` filter is exclusive on the second-granularity
+                // timestamp, so the boundary post is not re-fetched. Posts that
+                // share that exact second but were not yet archived could be
+                // missed; the window is one second and Tumblr timestamps rarely
+                // collide, so we accept it rather than re-fetching a full second.
                 config.after = Some(s.newest_post_timestamp);
                 if !config.quiet {
                     say!(
