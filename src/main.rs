@@ -13,6 +13,17 @@ use crabrave::handlers::blog::Post;
 const PROJECT_QUALIFIER: &str = "com.ryanfaulhaber";
 const PROJECT_NAME: &str = "archivr";
 
+/// Writes a progress line to stdout, treating a closed pipe (e.g. `archivr ... | head`)
+/// as success so the backup keeps running even after the reader goes away.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        match writeln!(std::io::stdout(), $($arg)*) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            other => other,
+        }
+    }};
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -50,8 +61,7 @@ async fn main() -> anyhow::Result<()> {
             Some(s) if s.blog_name == config.blog_name => {
                 config.after = Some(s.newest_post_timestamp);
                 if !config.quiet {
-                    writeln!(
-                        std::io::stdout(),
+                    say!(
                         "Incremental backup: fetching posts newer than {} (last archived post)",
                         s.newest_post_timestamp
                     )?;
@@ -67,8 +77,7 @@ async fn main() -> anyhow::Result<()> {
             }
             None => {
                 if !config.quiet {
-                    writeln!(
-                        std::io::stdout(),
+                    say!(
                         "Incremental backup: no prior state found, performing a full backup to establish baseline"
                     )?;
                 }
@@ -124,10 +133,9 @@ async fn main() -> anyhow::Result<()> {
         }
         if !config.quiet {
             if params.is_empty() {
-                writeln!(std::io::stdout(), "Resuming with default parameters")?;
+                say!("Resuming with default parameters")?;
             } else {
-                writeln!(
-                    std::io::stdout(),
+                say!(
                     "Resuming with saved parameters: {}",
                     params.join(" ")
                 )?;
@@ -145,19 +153,14 @@ async fn main() -> anyhow::Result<()> {
 
     if !config.quiet {
         if config.resume {
-            writeln!(
-                std::io::stdout(),
+            say!(
                 "Backing up {} (resuming previous job)...",
                 config.blog_name
             )?;
         } else if config.incremental && config.after.is_some() {
-            writeln!(
-                std::io::stdout(),
-                "Backing up {} (incremental)...",
-                config.blog_name
-            )?;
+            say!("Backing up {} (incremental)...", config.blog_name)?;
         } else {
-            writeln!(std::io::stdout(), "Backing up {}...", config.blog_name)?;
+            say!("Backing up {}...", config.blog_name)?;
         }
     }
 
@@ -182,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if !config.quiet {
-        writeln!(std::io::stdout(), "Backup complete.")?;
+        say!("Backup complete.")?;
     }
 
     Ok(())
@@ -348,7 +351,7 @@ async fn run_backup(
             job.save(job_file)?;
 
             if !config.quiet {
-                writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
+                say!("  {} posts archived", posts_archived)?;
             }
         }
         Ok(())
