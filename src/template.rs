@@ -127,187 +127,6 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// Renders a single ContentBlock to HTML
-///
-/// This function can be used for programmatic rendering outside of templates.
-pub fn render_content_block(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Text { text, subtype, .. } => {
-            let class = html_escape(subtype.as_deref().unwrap_or(""));
-            let text = html_escape(text);
-            format!(r#"<div class="content-block {class}">{text}</div>"#)
-        }
-        ContentBlock::Image {
-            media,
-            alt_text,
-            caption,
-            ..
-        } => {
-            let mut html = String::new();
-            let Some(m) = media.first() else {
-                return html;
-            };
-            let alt = html_escape(alt_text.as_deref().unwrap_or(""));
-            let width_attr = m
-                .width
-                .map(|w| format!(r#" width="{w}""#))
-                .unwrap_or_default();
-            html.push_str(&format!(
-                r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width_attr}>"#,
-                url = html_escape(&m.url)
-            ));
-            if let Some(cap) = caption {
-                html.push_str(&format!("<figcaption>{cap}</figcaption>", cap = html_escape(cap)));
-            }
-            html.push_str("</figure>");
-            html
-        }
-        ContentBlock::Video {
-            media,
-            url,
-            embed_html,
-            duration,
-            ..
-        } => {
-            let mut html = String::from(r#"<div class="content-block video-embed">"#);
-            if let Some(embed) = embed_html {
-                html.push_str(embed);
-            } else if let Some(media_list) = media {
-                for m in media_list {
-                    let width_attr = m
-                        .width
-                        .map(|w| format!(r#" width="{w}""#))
-                        .unwrap_or_default();
-                    let duration_str = duration
-                        .map(|d| format!(" ({}s)", d as i64))
-                        .unwrap_or_default();
-                    html.push_str(&format!(
-                        r#"<video controls src="{url}"{width_attr}></video>{duration_str}"#,
-                        url = html_escape(&m.url)
-                    ));
-                }
-            } else if let Some(video_url) = url {
-                html.push_str(&format!(
-                    r#"<a href="{video_url}">Video link</a>"#,
-                    video_url = html_escape(video_url)
-                ));
-            }
-            html.push_str("</div>");
-            html
-        }
-        ContentBlock::Audio {
-            media,
-            url,
-            title,
-            artist,
-            album,
-            embed_html,
-            ..
-        } => {
-            let mut html = String::from(r#"<div class="content-block audio-embed">"#);
-
-            // Audio metadata
-            if title.is_some() || artist.is_some() || album.is_some() {
-                html.push_str(r#"<div class="audio-info">"#);
-                if let Some(t) = title {
-                    html.push_str(&format!(
-                        r#"<span class="audio-title">{t}</span>"#,
-                        t = html_escape(t)
-                    ));
-                }
-                if let Some(a) = artist {
-                    html.push_str(&format!(
-                        r#" <span class="audio-artist">by {a}</span>"#,
-                        a = html_escape(a)
-                    ));
-                }
-                if let Some(alb) = album {
-                    html.push_str(&format!(
-                        r#" <span class="audio-album">({alb})</span>"#,
-                        alb = html_escape(alb)
-                    ));
-                }
-                html.push_str("</div>");
-            }
-
-            if let Some(embed) = embed_html {
-                html.push_str(embed);
-            } else if let Some(media_object) = media {
-                html.push_str(&format!(
-                    r#"<audio controls src="{}"></audio>"#,
-                    html_escape(&media_object.url)
-                ));
-            } else if let Some(audio_url) = url {
-                html.push_str(&format!(
-                    r#"<a href="{audio_url}">Audio link</a>"#,
-                    audio_url = html_escape(audio_url)
-                ));
-            }
-            html.push_str("</div>");
-            html
-        }
-        ContentBlock::Link {
-            url,
-            title,
-            description,
-            ..
-        } => {
-            let display_title = html_escape(title.as_deref().unwrap_or(url));
-            let mut html = format!(
-                r#"<div class="content-block link-block"><a href="{url}">{display_title}</a>"#,
-                url = html_escape(url)
-            );
-            if let Some(desc) = description {
-                html.push_str(&format!("<p>{desc}</p>", desc = html_escape(desc)));
-            }
-            html.push_str("</div>");
-            html
-        }
-        ContentBlock::Paywall { text, .. } => {
-            let msg = html_escape(text.as_deref().unwrap_or("Premium content"));
-            format!(r#"<div class="content-block paywall">{msg}</div>"#)
-        }
-        ContentBlock::Poll {
-            question,
-            answers,
-            settings,
-            ..
-        } => {
-            let mut html = String::from(r#"<div class="content-block poll">"#);
-            html.push_str(&format!(
-                r#"<div class="poll-question">{question}</div>"#,
-                question = html_escape(question)
-            ));
-            html.push_str(r#"<ul class="poll-answers">"#);
-            for answer in answers {
-                html.push_str(&format!("<li>{}</li>", html_escape(&answer.answer_text)));
-            }
-            html.push_str("</ul>");
-            if let Some(s) = settings {
-                let mut meta_parts: Vec<String> = Vec::new();
-                if s.multiple_choice {
-                    meta_parts.push("Multiple choice".to_string());
-                }
-                if let Some(status) = &s.close_status {
-                    meta_parts.push(html_escape(status));
-                }
-                if !meta_parts.is_empty() {
-                    html.push_str(&format!(
-                        r#"<div class="poll-meta">{}</div>"#,
-                        meta_parts.join(" · ")
-                    ));
-                }
-            }
-            html.push_str("</div>");
-            html
-        }
-        ContentBlock::Unknown | _ => {
-            r#"<div class="content-block unsupported-block">Unsupported block type</div>"#
-                .to_string()
-        }
-    }
-}
-
 /// Converts a Post to a minijinja Value for template rendering
 fn post_to_value(post: &Post) -> Value {
     // Convert content blocks to a serializable format
@@ -974,26 +793,16 @@ mod tests {
     }
 
     #[test]
-    fn test_render_text_block() {
-        let block = ContentBlock::Text {
-            text: "Hello, world!".to_string(),
-            subtype: None,
-            formatting: None,
-        };
-        let html = render_content_block(&block);
-        assert!(html.contains("Hello, world!"));
-        assert!(html.contains("content-block"));
-    }
-
-    #[test]
-    fn test_render_text_block_with_subtype() {
-        let block = ContentBlock::Text {
+    fn render_text_block_applies_subtype_class() {
+        let mut post = minimal_post();
+        post.content = vec![ContentBlock::Text {
             text: "A heading".to_string(),
             subtype: Some("heading1".to_string()),
             formatting: None,
-        };
-        let html = render_content_block(&block);
-        assert!(html.contains("heading1"));
+        }];
+
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"class="content-block heading1""#));
         assert!(html.contains("A heading"));
     }
 
