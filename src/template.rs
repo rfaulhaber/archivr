@@ -57,7 +57,7 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
 <body>
   <article>
     <header class="meta">
-      <a href="{{ post.post_url }}">{{ post.blog_name }}</a>
+      <a href="{{ post.post_url | safe_url }}">{{ post.blog_name }}</a>
       {%- if post.date %} &middot; {{ post.date }}{% endif %}
       {%- if post.note_count %} &middot; {{ post.note_count }} notes{% endif %}
     </header>
@@ -494,6 +494,13 @@ impl<'a> PostRenderer<'a> {
             Value::from_safe_string(render_block_from_value(&block))
         });
 
+        // Neutralizes dangerous URL schemes for hrefs in templates and escapes
+        // the attribute-significant characters. Returned as safe so minijinja
+        // doesn't re-escape it (which would also mangle the URL's slashes).
+        env.add_filter("safe_url", |url: Value| -> Value {
+            Value::from_safe_string(html_escape(&sanitize_url(url.as_str().unwrap_or(""))))
+        });
+
         env.add_template("post", template_source)?;
 
         Ok(Self {
@@ -877,6 +884,23 @@ mod tests {
         let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
         assert!(html.contains("&lt;script&gt;"));
         assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn render_sanitizes_post_url_href() {
+        let mut post = minimal_post();
+        post.post_url = "javascript:alert(1)".to_owned();
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(!html.contains("javascript:"));
+        assert!(html.contains(r##"<a href="#">"##));
+    }
+
+    #[test]
+    fn render_keeps_normal_post_url_href() {
+        let mut post = minimal_post();
+        post.post_url = "https://test.tumblr.com/post/123".to_owned();
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"<a href="https://test.tumblr.com/post/123">"#));
     }
 
     #[test]
