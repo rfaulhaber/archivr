@@ -205,7 +205,8 @@ async fn run_backup(
     let mut buffered: Option<BufferedHtmlPost> = None;
     let mut newest_observed: Option<PostTimestamp> = None;
 
-    loop {
+    let loop_result: anyhow::Result<()> = async {
+        loop {
         let mut post_builder = client
             .blogs(config.blog_name.clone())
             .posts()
@@ -325,18 +326,27 @@ async fn run_backup(
             posts_archived += 1;
         }
 
-        job.offset += post_response.posts.len() as u64;
-        job.save(job_file)?;
+            job.offset += post_response.posts.len() as u64;
+            job.save(job_file)?;
 
-        if !config.quiet {
-            writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
+            if !config.quiet {
+                writeln!(std::io::stdout(), "  {} posts archived", posts_archived)?;
+            }
         }
+        Ok(())
     }
+    .await;
 
-    // Finalize the last buffered HTML post (no older neighbor)
+    // Flush any buffered HTML post to disk before returning, so an interrupted
+    // run (e.g. a rate limit) doesn't drop the last in-memory post. On the
+    // normal exit this is the genuinely-oldest post; on an error path its older
+    // neighbour may only be fetched on a later --resume run. Either way it has
+    // no known older link yet, so emit an empty older-nav placeholder.
     if let Some(last) = buffered.take() {
         finalize_buffered_post(&last, "<span></span>")?;
     }
+
+    loop_result?;
 
     Ok(newest_observed)
 }
