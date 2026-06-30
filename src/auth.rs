@@ -158,7 +158,14 @@ fn parse_cookie_file(path: &Utf8Path) -> anyhow::Result<Arc<CookieJar>> {
 
     for line in contents.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+
+        // HttpOnly cookies are encoded with a `#HttpOnly_` marker on the domain
+        // field; strip it so they aren't mistaken for comment lines and dropped.
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        if line.starts_with('#') {
             continue;
         }
 
