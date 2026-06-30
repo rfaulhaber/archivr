@@ -420,13 +420,15 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
             embed_html,
             ..
         } => {
-            let media_values: Value = media
+            // Wrap in a list so the renderer's list-indexing logic finds it,
+            // matching how video media is emitted.
+            let media_values: Vec<Value> = media
                 .as_ref()
                 .map(|m| {
-                    context! {
+                    vec![context! {
                         url => m.url,
                         media_type => m.media_type,
-                    }
+                    }]
                 })
                 .unwrap_or_default();
             context! {
@@ -955,6 +957,20 @@ mod tests {
         let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
         // Provider embed markup is trusted oEmbed HTML and must pass through unescaped.
         assert!(html.contains("<iframe src=\"https://example.com\"></iframe>"));
+    }
+
+    #[test]
+    fn render_emits_audio_player_for_media() {
+        let mut post = minimal_post();
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "audio",
+            "media": { "url": "https://cdn.tumblr.com/track.mp3" }
+        }))
+        .unwrap();
+        post.content = vec![block];
+
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"<audio controls src="https://cdn.tumblr.com/track.mp3">"#));
     }
 
     #[test]
