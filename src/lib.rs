@@ -20,6 +20,9 @@ use tokio::{
 
 pub const DEFAULT_CALLBACK_PORT: u16 = 6263;
 
+/// How long to wait for the browser to hit the OAuth callback before giving up.
+const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub type PostTimestamp = i64;
 
 #[derive(Debug, Error)]
@@ -39,27 +42,47 @@ pub enum ArchivrError {
 pub async fn capture_callback() -> anyhow::Result<(String, Option<String>)> {
     let listener = TcpListener::bind(("127.0.0.1", DEFAULT_CALLBACK_PORT)).await?;
 
-    let (mut stream, _) = listener.accept().await?;
-    let (reader, mut writer) = stream.split();
-    let mut reader = BufReader::new(reader);
+    tokio::time::timeout(CALLBACK_TIMEOUT, accept_callback(&listener))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "timed out after {}s waiting for the OAuth callback. Re-run and \
+                 complete authentication in the browser, or use --headless.",
+                CALLBACK_TIMEOUT.as_secs()
+            )
+        })?
+}
 
-    // Read the request line: GET /callback?code=xyz&state=abc HTTP/1.1
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).await?;
+/// Accepts connections until one carries a real HTTP request line, then replies
+/// and returns the parsed code/state. Empty sockets (some browsers speculatively
+/// pre-connect) are ignored so they don't abort the flow.
+async fn accept_callback(listener: &TcpListener) -> anyhow::Result<(String, Option<String>)> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let (reader, mut writer) = stream.split();
+        let mut reader = BufReader::new(reader);
 
-    // Extract the code and state from the query string
-    let code_and_state = parse_code_from_request(&request_line)?;
+        // Read the request line: GET /callback?code=xyz&state=abc HTTP/1.1
+        let mut request_line = String::new();
+        let bytes_read = reader.read_line(&mut request_line).await?;
+        if bytes_read == 0 || request_line.trim().is_empty() {
+            continue;
+        }
 
-    // Send a minimal response
-    let body = "<h1>Success!</h1><p>You can close this tab.</p>";
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    writer.write_all(response.as_bytes()).await?;
+        // Extract the code and state from the query string
+        let code_and_state = parse_code_from_request(&request_line)?;
 
-    Ok(code_and_state)
+        // Send a minimal response
+        let body = "<h1>Success!</h1><p>You can close this tab.</p>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        writer.write_all(response.as_bytes()).await?;
+
+        return Ok(code_and_state);
+    }
 }
 
 /// Extracts the authorization code and optional state from a query string.
