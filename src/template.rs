@@ -4,7 +4,7 @@
 //! Users can provide custom Jinja templates or use the built-in default.
 
 use crabrave::handlers::blog::{Post, TrailItem};
-use crabrave::npf::ContentBlock;
+use crabrave::npf::{ContentBlock, InlineFormat};
 use minijinja::{AutoEscape, Environment, Value, context};
 
 /// Default HTML template for rendering posts
@@ -107,6 +107,79 @@ pub fn build_older_nav_link(href: &str) -> String {
     format!(r#"<a href="{href}">Older &rarr;</a>"#, href = html_escape(href))
 }
 
+/// Renders NPF text together with its inline formatting ranges into escaped HTML.
+///
+/// NPF `start`/`end` indices count UTF-16 code units (Tumblr treats the text as a
+/// JS-style string), so the text is sliced in UTF-16 space to stay correct across
+/// multi-byte characters and emoji. The text is split at every range boundary and
+/// each segment is wrapped in all formats covering it, which produces well-formed
+/// nesting even when the source ranges overlap.
+fn render_formatted_text(text: &str, formatting: &[InlineFormat]) -> String {
+    if formatting.is_empty() {
+        return html_escape(text);
+    }
+
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let len = units.len();
+
+    let mut boundaries: Vec<usize> = vec![0, len];
+    for f in formatting {
+        if f.start < f.end {
+            boundaries.push(f.start.min(len));
+            boundaries.push(f.end.min(len));
+        }
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut html = String::new();
+    for window in boundaries.windows(2) {
+        let (seg_start, seg_end) = (window[0], window[1]);
+        if seg_start >= seg_end {
+            continue;
+        }
+
+        let tags: Vec<(String, &'static str)> = formatting
+            .iter()
+            .filter(|f| f.start <= seg_start && f.end >= seg_end && f.start < f.end)
+            .filter_map(format_tags)
+            .collect();
+
+        for (open, _) in &tags {
+            html.push_str(open);
+        }
+        html.push_str(&html_escape(&String::from_utf16_lossy(&units[seg_start..seg_end])));
+        for (_, close) in tags.iter().rev() {
+            html.push_str(close);
+        }
+    }
+    html
+}
+
+/// Maps an NPF inline format to its opening and closing HTML tags, or `None` for
+/// format types we don't render.
+fn format_tags(f: &InlineFormat) -> Option<(String, &'static str)> {
+    match f.format_type.as_str() {
+        "bold" => Some(("<strong>".to_owned(), "</strong>")),
+        "italic" => Some(("<em>".to_owned(), "</em>")),
+        "strikethrough" => Some(("<s>".to_owned(), "</s>")),
+        "small" => Some(("<small>".to_owned(), "</small>")),
+        "link" => {
+            let url = html_escape(f.url.as_deref().unwrap_or(""));
+            Some((format!(r#"<a href="{url}">"#), "</a>"))
+        }
+        "mention" => {
+            let url = html_escape(f.blog.as_ref().and_then(|b| b.url.as_deref()).unwrap_or(""));
+            Some((format!(r#"<a href="{url}" class="mention">"#), "</a>"))
+        }
+        "color" => {
+            let hex = html_escape(f.hex.as_deref().unwrap_or(""));
+            Some((format!(r#"<span style="color:{hex}">"#), "</span>"))
+        }
+        _ => None,
+    }
+}
+
 /// Escapes a string for safe inclusion in HTML text and double-quoted attributes.
 ///
 /// NPF text/link/poll fields are plain text, so they must be escaped before being
@@ -163,10 +236,17 @@ fn post_to_value(post: &Post) -> Value {
 /// Converts a ContentBlock to a minijinja Value
 fn content_block_to_value(block: &ContentBlock) -> Value {
     match block {
-        ContentBlock::Text { text, subtype, .. } => {
+        ContentBlock::Text {
+            text,
+            subtype,
+            formatting,
+        } => {
+            let formatting = formatting.as_deref().unwrap_or(&[]);
             context! {
                 type => "text",
                 text => text,
+                // Pre-rendered, formatting-aware HTML (already escaped + wrapped).
+                text_html => render_formatted_text(text, formatting),
                 subtype => subtype,
             }
         }
@@ -430,20 +510,28 @@ fn render_block_from_value(block: &Value) -> String {
 
     match block_type.as_str() {
         "text" => {
-            let text = block
-                .get_attr("text")
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default();
             let subtype = block
                 .get_attr("subtype")
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
+            // Prefer the pre-rendered formatting-aware HTML; fall back to escaping
+            // the raw text (e.g. for custom-built blocks without text_html).
+            let content = block
+                .get_attr("text_html")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| {
+                    let text = block
+                        .get_attr("text")
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    html_escape(&text)
+                });
             format!(
-                r#"<div class="content-block {subtype}">{text}</div>"#,
-                subtype = html_escape(&subtype),
-                text = html_escape(&text)
+                r#"<div class="content-block {subtype}">{content}</div>"#,
+                subtype = html_escape(&subtype)
             )
         }
         "image" => {
@@ -790,6 +878,68 @@ mod tests {
 
         let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
         assert!(html.contains(r#"<audio controls src="https://cdn.tumblr.com/track.mp3">"#));
+    }
+
+    fn text_block(text: &str, formatting: Vec<InlineFormat>) -> Post {
+        let mut post = minimal_post();
+        post.content = vec![ContentBlock::Text {
+            text: text.to_owned(),
+            subtype: None,
+            formatting: Some(formatting),
+        }];
+        post
+    }
+
+    fn fmt(start: usize, end: usize, ty: &str) -> InlineFormat {
+        InlineFormat {
+            start,
+            end,
+            format_type: ty.to_owned(),
+            url: None,
+            blog: None,
+            hex: None,
+        }
+    }
+
+    #[test]
+    fn render_applies_bold_formatting() {
+        let post = text_block("hello world", vec![fmt(0, 5, "bold")]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("<strong>hello</strong> world"));
+    }
+
+    #[test]
+    fn render_applies_link_formatting() {
+        let mut link = fmt(0, 4, "link");
+        link.url = Some("https://example.com/?a=1&b=2".to_owned());
+        let post = text_block("here", vec![link]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"<a href="https://example.com/?a=1&amp;b=2">here</a>"#));
+    }
+
+    #[test]
+    fn render_escapes_inside_formatting() {
+        let post = text_block("a<b>c", vec![fmt(0, 5, "italic")]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("<em>a&lt;b&gt;c</em>"));
+    }
+
+    #[test]
+    fn render_formatting_uses_utf16_offsets() {
+        // The emoji is two UTF-16 code units, so bolding "bold" starts at index 2.
+        let post = text_block("😀bold", vec![fmt(2, 6, "bold")]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("😀<strong>bold</strong>"));
+    }
+
+    #[test]
+    fn render_overlapping_formatting_stays_well_formed() {
+        // bold over [0,7), italic over [4,7) splits at index 4: the segment method
+        // re-opens bold rather than spanning the boundary, which is redundant but
+        // well-formed HTML.
+        let post = text_block("abcdefg", vec![fmt(0, 7, "bold"), fmt(4, 7, "italic")]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("<strong>abcd</strong><strong><em>efg</em></strong>"));
     }
 
     #[test]
