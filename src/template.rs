@@ -165,18 +165,57 @@ fn format_tags(f: &InlineFormat) -> Option<(String, &'static str)> {
         "strikethrough" => Some(("<s>".to_owned(), "</s>")),
         "small" => Some(("<small>".to_owned(), "</small>")),
         "link" => {
-            let url = html_escape(f.url.as_deref().unwrap_or(""));
+            let url = html_escape(&sanitize_url(f.url.as_deref().unwrap_or("")));
             Some((format!(r#"<a href="{url}">"#), "</a>"))
         }
         "mention" => {
-            let url = html_escape(f.blog.as_ref().and_then(|b| b.url.as_deref()).unwrap_or(""));
+            let url = html_escape(&sanitize_url(
+                f.blog.as_ref().and_then(|b| b.url.as_deref()).unwrap_or(""),
+            ));
             Some((format!(r#"<a href="{url}" class="mention">"#), "</a>"))
         }
         "color" => {
-            let hex = html_escape(f.hex.as_deref().unwrap_or(""));
-            Some((format!(r#"<span style="color:{hex}">"#), "</span>"))
+            let hex = f.hex.as_deref().unwrap_or("");
+            // Only well-formed hex colors are allowed into the style attribute.
+            is_hex_color(hex).then(|| (format!(r#"<span style="color:{hex}">"#), "</span>"))
         }
         _ => None,
+    }
+}
+
+/// Returns a URL safe to place in an `href`, neutralizing dangerous schemes
+/// (`javascript:`, `data:`, etc.) that escaping alone does not stop.
+///
+/// Characters browsers ignore when resolving a scheme (whitespace, control chars)
+/// are stripped before the check so `java\tscript:` can't slip through. A scheme
+/// not on the allowlist is replaced with `#`; relative URLs are left intact.
+fn sanitize_url(url: &str) -> String {
+    let probe: String = url
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    if let Some(colon) = probe.find(':') {
+        // A '/', '?' or '#' before the colon means it's part of the path, not a scheme.
+        let has_scheme = !probe[..colon].contains(['/', '?', '#']);
+        if has_scheme {
+            const SAFE_SCHEMES: [&str; 4] = ["http", "https", "mailto", "ftp"];
+            if !SAFE_SCHEMES.contains(&&probe[..colon]) {
+                return "#".to_owned();
+            }
+        }
+    }
+
+    url.to_owned()
+}
+
+/// Returns `true` if `s` is a `#rgb` or `#rrggbb` hex color, so it can be placed
+/// in a `style` attribute without risking CSS injection.
+fn is_hex_color(s: &str) -> bool {
+    match s.strip_prefix('#') {
+        Some(rest) => (rest.len() == 3 || rest.len() == 6) && rest.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
     }
 }
 
@@ -612,7 +651,7 @@ fn render_block_from_value(block: &Value) -> String {
             {
                 html.push_str(&format!(
                     r#"<a href="{url_str}">Video link</a>"#,
-                    url_str = html_escape(url_str)
+                    url_str = html_escape(&sanitize_url(url_str))
                 ));
             }
             html.push_str("</div>");
@@ -685,7 +724,7 @@ fn render_block_from_value(block: &Value) -> String {
             {
                 html.push_str(&format!(
                     r#"<a href="{url_str}">Audio link</a>"#,
-                    url_str = html_escape(url_str)
+                    url_str = html_escape(&sanitize_url(url_str))
                 ));
             }
             html.push_str("</div>");
@@ -704,7 +743,7 @@ fn render_block_from_value(block: &Value) -> String {
                 .unwrap_or_else(|| url.clone());
             let mut html = format!(
                 r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#,
-                url = html_escape(&url),
+                url = html_escape(&sanitize_url(&url)),
                 title = html_escape(&title)
             );
             if let Ok(desc) = block.get_attr("description")
@@ -915,6 +954,54 @@ mod tests {
         let post = text_block("here", vec![link]);
         let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
         assert!(html.contains(r#"<a href="https://example.com/?a=1&amp;b=2">here</a>"#));
+    }
+
+    #[test]
+    fn render_neutralizes_javascript_link() {
+        let mut link = fmt(0, 4, "link");
+        link.url = Some("javascript:alert(1)".to_owned());
+        let post = text_block("here", vec![link]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(!html.contains("javascript:"));
+        assert!(html.contains(r##"<a href="#">here</a>"##));
+    }
+
+    #[test]
+    fn render_neutralizes_obfuscated_javascript_link() {
+        let mut link = fmt(0, 4, "link");
+        // Embedded tab/newline that browsers ignore when resolving the scheme.
+        link.url = Some("java\tscript:\nalert(1)".to_owned());
+        let post = text_block("here", vec![link]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(!html.to_ascii_lowercase().contains("javascript"));
+    }
+
+    #[test]
+    fn render_drops_invalid_color() {
+        let mut color = fmt(0, 3, "color");
+        color.hex = Some("red;background:url(x)".to_owned());
+        let post = text_block("abc", vec![color]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(!html.contains("style="));
+        assert!(html.contains("abc"));
+    }
+
+    #[test]
+    fn render_keeps_valid_color() {
+        let mut color = fmt(0, 3, "color");
+        color.hex = Some("#ff0000".to_owned());
+        let post = text_block("abc", vec![color]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"<span style="color:#ff0000">abc</span>"#));
+    }
+
+    #[test]
+    fn render_keeps_safe_link() {
+        let mut link = fmt(0, 4, "link");
+        link.url = Some("https://example.com/page".to_owned());
+        let post = text_block("here", vec![link]);
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains(r#"<a href="https://example.com/page">here</a>"#));
     }
 
     #[test]
