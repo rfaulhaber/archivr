@@ -5,7 +5,7 @@
 
 use crabrave::handlers::blog::{Post, TrailItem};
 use crabrave::npf::ContentBlock;
-use minijinja::{Environment, Value, context};
+use minijinja::{AutoEscape, Environment, Value, context};
 
 /// Default HTML template for rendering posts
 pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
@@ -104,7 +104,27 @@ pub const OLDER_NAV_PLACEHOLDER: &str = "<!-- ARCHIVR:OLDER_NAV -->";
 
 /// Builds the HTML for an "Older" navigation link, to be substituted for [`OLDER_NAV_PLACEHOLDER`].
 pub fn build_older_nav_link(href: &str) -> String {
-    format!(r#"<a href="{href}">Older &rarr;</a>"#)
+    format!(r#"<a href="{href}">Older &rarr;</a>"#, href = html_escape(href))
+}
+
+/// Escapes a string for safe inclusion in HTML text and double-quoted attributes.
+///
+/// NPF text/link/poll fields are plain text, so they must be escaped before being
+/// interpolated into the HTML we build by hand (minijinja's auto-escaping only
+/// covers `{{ ... }}` template expressions, not strings assembled in Rust).
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Renders a single ContentBlock to HTML
@@ -113,7 +133,8 @@ pub fn build_older_nav_link(href: &str) -> String {
 pub fn render_content_block(block: &ContentBlock) -> String {
     match block {
         ContentBlock::Text { text, subtype, .. } => {
-            let class = subtype.as_deref().unwrap_or("");
+            let class = html_escape(subtype.as_deref().unwrap_or(""));
+            let text = html_escape(text);
             format!(r#"<div class="content-block {class}">{text}</div>"#)
         }
         ContentBlock::Image {
@@ -126,17 +147,17 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             let Some(m) = media.first() else {
                 return html;
             };
-            let alt = alt_text.as_deref().unwrap_or("");
+            let alt = html_escape(alt_text.as_deref().unwrap_or(""));
             let width_attr = m
                 .width
                 .map(|w| format!(r#" width="{w}""#))
                 .unwrap_or_default();
             html.push_str(&format!(
                 r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width_attr}>"#,
-                url = m.url
+                url = html_escape(&m.url)
             ));
             if let Some(cap) = caption {
-                html.push_str(&format!("<figcaption>{cap}</figcaption>"));
+                html.push_str(&format!("<figcaption>{cap}</figcaption>", cap = html_escape(cap)));
             }
             html.push_str("</figure>");
             html
@@ -162,11 +183,14 @@ pub fn render_content_block(block: &ContentBlock) -> String {
                         .unwrap_or_default();
                     html.push_str(&format!(
                         r#"<video controls src="{url}"{width_attr}></video>{duration_str}"#,
-                        url = m.url
+                        url = html_escape(&m.url)
                     ));
                 }
             } else if let Some(video_url) = url {
-                html.push_str(&format!(r#"<a href="{video_url}">Video link</a>"#));
+                html.push_str(&format!(
+                    r#"<a href="{video_url}">Video link</a>"#,
+                    video_url = html_escape(video_url)
+                ));
             }
             html.push_str("</div>");
             html
@@ -186,13 +210,22 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             if title.is_some() || artist.is_some() || album.is_some() {
                 html.push_str(r#"<div class="audio-info">"#);
                 if let Some(t) = title {
-                    html.push_str(&format!(r#"<span class="audio-title">{t}</span>"#));
+                    html.push_str(&format!(
+                        r#"<span class="audio-title">{t}</span>"#,
+                        t = html_escape(t)
+                    ));
                 }
                 if let Some(a) = artist {
-                    html.push_str(&format!(r#" <span class="audio-artist">by {a}</span>"#));
+                    html.push_str(&format!(
+                        r#" <span class="audio-artist">by {a}</span>"#,
+                        a = html_escape(a)
+                    ));
                 }
                 if let Some(alb) = album {
-                    html.push_str(&format!(r#" <span class="audio-album">({alb})</span>"#));
+                    html.push_str(&format!(
+                        r#" <span class="audio-album">({alb})</span>"#,
+                        alb = html_escape(alb)
+                    ));
                 }
                 html.push_str("</div>");
             }
@@ -202,10 +235,13 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             } else if let Some(media_object) = media {
                 html.push_str(&format!(
                     r#"<audio controls src="{}"></audio>"#,
-                    media_object.url
+                    html_escape(&media_object.url)
                 ));
             } else if let Some(audio_url) = url {
-                html.push_str(&format!(r#"<a href="{audio_url}">Audio link</a>"#));
+                html.push_str(&format!(
+                    r#"<a href="{audio_url}">Audio link</a>"#,
+                    audio_url = html_escape(audio_url)
+                ));
             }
             html.push_str("</div>");
             html
@@ -216,18 +252,19 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             description,
             ..
         } => {
-            let display_title = title.as_deref().unwrap_or(url);
+            let display_title = html_escape(title.as_deref().unwrap_or(url));
             let mut html = format!(
-                r#"<div class="content-block link-block"><a href="{url}">{display_title}</a>"#
+                r#"<div class="content-block link-block"><a href="{url}">{display_title}</a>"#,
+                url = html_escape(url)
             );
             if let Some(desc) = description {
-                html.push_str(&format!("<p>{desc}</p>"));
+                html.push_str(&format!("<p>{desc}</p>", desc = html_escape(desc)));
             }
             html.push_str("</div>");
             html
         }
         ContentBlock::Paywall { text, .. } => {
-            let msg = text.as_deref().unwrap_or("Premium content");
+            let msg = html_escape(text.as_deref().unwrap_or("Premium content"));
             format!(r#"<div class="content-block paywall">{msg}</div>"#)
         }
         ContentBlock::Poll {
@@ -237,10 +274,13 @@ pub fn render_content_block(block: &ContentBlock) -> String {
             ..
         } => {
             let mut html = String::from(r#"<div class="content-block poll">"#);
-            html.push_str(&format!(r#"<div class="poll-question">{question}</div>"#));
+            html.push_str(&format!(
+                r#"<div class="poll-question">{question}</div>"#,
+                question = html_escape(question)
+            ));
             html.push_str(r#"<ul class="poll-answers">"#);
             for answer in answers {
-                html.push_str(&format!("<li>{}</li>", answer.answer_text));
+                html.push_str(&format!("<li>{}</li>", html_escape(&answer.answer_text)));
             }
             html.push_str("</ul>");
             if let Some(s) = settings {
@@ -249,7 +289,7 @@ pub fn render_content_block(block: &ContentBlock) -> String {
                     meta_parts.push("Multiple choice".to_string());
                 }
                 if let Some(status) = &s.close_status {
-                    meta_parts.push(status.clone());
+                    meta_parts.push(html_escape(status));
                 }
                 if !meta_parts.is_empty() {
                     html.push_str(&format!(
@@ -504,9 +544,14 @@ impl<'a> PostRenderer<'a> {
     pub fn with_template(template_source: &'static str) -> anyhow::Result<Self> {
         let mut env = Environment::new();
 
-        // Add the render_block function
-        env.add_function("render_block", |block: Value| -> String {
-            render_block_from_value(&block)
+        // Escape `{{ ... }}` expressions as HTML regardless of template name
+        // (templates are registered as "post", which would otherwise disable it).
+        env.set_auto_escape_callback(|_name| AutoEscape::Html);
+
+        // render_block returns already-escaped HTML markup, so mark it safe to
+        // avoid double-escaping it when interpolated with `{{ render_block(...) }}`.
+        env.add_function("render_block", |block: Value| -> Value {
+            Value::from_safe_string(render_block_from_value(&block))
         });
 
         env.add_template("post", template_source)?;
@@ -574,7 +619,11 @@ fn render_block_from_value(block: &Value) -> String {
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
-            format!(r#"<div class="content-block {subtype}">{text}</div>"#)
+            format!(
+                r#"<div class="content-block {subtype}">{text}</div>"#,
+                subtype = html_escape(&subtype),
+                text = html_escape(&text)
+            )
         }
         "image" => {
             let mut html = String::new();
@@ -600,12 +649,17 @@ fn render_block_from_value(block: &Value) -> String {
                             .map(|w| format!(r#" width="{w}""#))
                             .unwrap_or_default();
                         html.push_str(&format!(
-                            r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width}>"#
+                            r#"<figure class="content-block image"><img src="{url}" alt="{alt}"{width}>"#,
+                            url = html_escape(&url),
+                            alt = html_escape(&alt)
                         ));
                         if let Ok(caption) = block.get_attr("caption")
                             && let Some(cap) = caption.as_str()
                         {
-                            html.push_str(&format!("<figcaption>{cap}</figcaption>"));
+                            html.push_str(&format!(
+                                "<figcaption>{cap}</figcaption>",
+                                cap = html_escape(cap)
+                            ));
                         }
                         html.push_str("</figure>");
                     }
@@ -639,14 +693,18 @@ fn render_block_from_value(block: &Value) -> String {
                             .map(|w| format!(r#" width="{w}""#))
                             .unwrap_or_default();
                         html.push_str(&format!(
-                            r#"<video controls src="{url}"{width}></video>"#
+                            r#"<video controls src="{url}"{width}></video>"#,
+                            url = html_escape(&url)
                         ));
                     }
                 }
             } else if let Ok(url) = block.get_attr("url")
                 && let Some(url_str) = url.as_str()
             {
-                html.push_str(&format!(r#"<a href="{url_str}">Video link</a>"#));
+                html.push_str(&format!(
+                    r#"<a href="{url_str}">Video link</a>"#,
+                    url_str = html_escape(url_str)
+                ));
             }
             html.push_str("</div>");
             html
@@ -670,13 +728,22 @@ fn render_block_from_value(block: &Value) -> String {
             if title.is_some() || artist.is_some() || album.is_some() {
                 html.push_str(r#"<div class="audio-info">"#);
                 if let Some(t) = &title {
-                    html.push_str(&format!(r#"<span class="audio-title">{t}</span>"#));
+                    html.push_str(&format!(
+                        r#"<span class="audio-title">{t}</span>"#,
+                        t = html_escape(t)
+                    ));
                 }
                 if let Some(a) = &artist {
-                    html.push_str(&format!(r#" <span class="audio-artist">by {a}</span>"#));
+                    html.push_str(&format!(
+                        r#" <span class="audio-artist">by {a}</span>"#,
+                        a = html_escape(a)
+                    ));
                 }
                 if let Some(alb) = &album {
-                    html.push_str(&format!(r#" <span class="audio-album">({alb})</span>"#));
+                    html.push_str(&format!(
+                        r#" <span class="audio-album">({alb})</span>"#,
+                        alb = html_escape(alb)
+                    ));
                 }
                 html.push_str("</div>");
             }
@@ -698,13 +765,19 @@ fn render_block_from_value(block: &Value) -> String {
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_default();
-                        html.push_str(&format!(r#"<audio controls src="{url}"></audio>"#));
+                        html.push_str(&format!(
+                            r#"<audio controls src="{url}"></audio>"#,
+                            url = html_escape(&url)
+                        ));
                     }
                 }
             } else if let Ok(url) = block.get_attr("url")
                 && let Some(url_str) = url.as_str()
             {
-                html.push_str(&format!(r#"<a href="{url_str}">Audio link</a>"#));
+                html.push_str(&format!(
+                    r#"<a href="{url_str}">Audio link</a>"#,
+                    url_str = html_escape(url_str)
+                ));
             }
             html.push_str("</div>");
             html
@@ -720,12 +793,15 @@ fn render_block_from_value(block: &Value) -> String {
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| url.clone());
-            let mut html =
-                format!(r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#);
+            let mut html = format!(
+                r#"<div class="content-block link-block"><a href="{url}">{title}</a>"#,
+                url = html_escape(&url),
+                title = html_escape(&title)
+            );
             if let Ok(desc) = block.get_attr("description")
                 && let Some(desc_str) = desc.as_str()
             {
-                html.push_str(&format!("<p>{desc_str}</p>"));
+                html.push_str(&format!("<p>{desc_str}</p>", desc_str = html_escape(desc_str)));
             }
             html.push_str("</div>");
             html
@@ -736,7 +812,10 @@ fn render_block_from_value(block: &Value) -> String {
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "Premium content".to_string());
-            format!(r#"<div class="content-block paywall">{text}</div>"#)
+            format!(
+                r#"<div class="content-block paywall">{text}</div>"#,
+                text = html_escape(&text)
+            )
         }
         "poll" => {
             let question = block
@@ -745,7 +824,10 @@ fn render_block_from_value(block: &Value) -> String {
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
             let mut html = String::from(r#"<div class="content-block poll">"#);
-            html.push_str(&format!(r#"<div class="poll-question">{question}</div>"#));
+            html.push_str(&format!(
+                r#"<div class="poll-question">{question}</div>"#,
+                question = html_escape(&question)
+            ));
             html.push_str(r#"<ul class="poll-answers">"#);
             if let Ok(answers) = block.get_attr("answers")
                 && let Some(len) = answers.len()
@@ -757,7 +839,7 @@ fn render_block_from_value(block: &Value) -> String {
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_default();
-                        html.push_str(&format!("<li>{text}</li>"));
+                        html.push_str(&format!("<li>{text}</li>", text = html_escape(&text)));
                     }
                 }
             }
@@ -772,7 +854,7 @@ fn render_block_from_value(block: &Value) -> String {
                 if let Ok(status) = settings.get_attr("close_status")
                     && let Some(s) = status.as_str()
                 {
-                    meta_parts.push(s.to_string());
+                    meta_parts.push(html_escape(s));
                 }
                 if !meta_parts.is_empty() {
                     html.push_str(&format!(
@@ -789,8 +871,91 @@ fn render_block_from_value(block: &Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn minimal_post() -> Post {
+        let json = serde_json::json!({
+            "id_string": "123",
+            "blog_name": "test",
+            "post_url": "https://test.tumblr.com/post/123",
+            "type": "text",
+            "timestamp": 1700000000,
+            "scheduled_publish_time": 0,
+            "note_count": 0,
+            "reblog_key": "abc",
+            "is_blocks_post_format": true,
+            "followed": false,
+            "liked": false,
+            "can_like": false,
+            "can_reblog": false,
+            "can_reply": false,
+            "can_send_in_message": false,
+            "can_mute": false,
+            "display_avatar": false,
+            "interactability_reblog": "",
+            "is_blazed": false,
+            "is_blaze_pending": false,
+            "can_ignite": false,
+            "can_blaze": false,
+            "muted": false,
+            "mute_end_timestamp": 0,
+            "content": [],
+            "trail": [],
+            "tags": [],
+            "layout": []
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn html_escape_replaces_special_chars() {
+        assert_eq!(
+            html_escape(r#"<a href="x">&'"#),
+            "&lt;a href=&quot;x&quot;&gt;&amp;&#39;"
+        );
+    }
+
+    #[test]
+    fn render_escapes_text_block_content() {
+        let mut post = minimal_post();
+        post.content = vec![ContentBlock::Text {
+            text: "<script>alert('xss')</script>".to_string(),
+            subtype: None,
+            formatting: None,
+        }];
+
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn render_escapes_top_level_fields() {
+        let mut post = minimal_post();
+        post.blog_name = "<b>evil</b>".to_string();
+        post.tags = vec!["<img src=x onerror=alert(1)>".to_string()];
+
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        assert!(html.contains("&lt;b&gt;evil"));
+        assert!(!html.contains("<img src=x"));
+    }
+
+    #[test]
+    fn render_keeps_video_embed_html_raw() {
+        let mut post = minimal_post();
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "video",
+            "embed_html": "<iframe src=\"https://example.com\"></iframe>"
+        }))
+        .unwrap();
+        post.content = vec![block];
+
+        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        // Provider embed markup is trusted oEmbed HTML and must pass through unescaped.
+        assert!(html.contains("<iframe src=\"https://example.com\"></iframe>"));
+    }
 
     #[test]
     fn test_render_text_block() {
