@@ -31,13 +31,27 @@ fn compute_expires_at(token: &crabrave::oauth::OAuth2Token) -> Option<i64> {
 }
 
 fn save_auth(auth: &Auth, path: &Utf8Path) -> anyhow::Result<()> {
-    fs_err::write(path, serde_json::to_string(auth)?)?;
+    let data = serde_json::to_string(auth)?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use fs_err::os::unix::fs::OpenOptionsExt as _;
+        use std::io::Write as _;
+        // Create the file 0600 from the start so the token is never briefly
+        // world-readable, and tighten perms in case it pre-existed looser.
+        let mut file = fs_err::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data.as_bytes())?;
+        use std::os::unix::fs::PermissionsExt as _;
         fs_err::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+
+    #[cfg(not(unix))]
+    fs_err::write(path, data)?;
 
     Ok(())
 }
