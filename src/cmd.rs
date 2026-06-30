@@ -63,7 +63,7 @@ pub struct Args {
 
     #[arg(
         long,
-        help = "Retrieve all posts after this date. Date can either be specified as a Unix timestamp prefixed with '@' or as an RFC3339-formatted date/datetime",
+        help = "Retrieve all posts before this date. Date can either be specified as a Unix timestamp prefixed with '@' or as an RFC3339-formatted date/datetime",
         value_name = "DATE",
         value_parser = parse_date
     )]
@@ -114,8 +114,12 @@ fn parse_date(s: &str) -> Result<i64, String> {
         return Ok(dt.timestamp());
     }
 
-    if let Ok(dt) = chrono::DateTime::parse_from_str(s, "%Y-%m-%d") {
-        return Ok(dt.timestamp());
+    // A bare `YYYY-MM-DD` has no time or offset, so parse it as a naive date and
+    // anchor it to midnight UTC. (`DateTime::parse_from_str` would reject it.)
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(dt) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(dt.and_utc().timestamp());
     }
 
     Err(format!(
@@ -141,6 +145,12 @@ mod tests {
         let input = "2023-11-14T00:00:00Z";
         let expected = Ok(1699920000_i64);
         assert_eq!(parse_date(input), expected);
+    }
+
+    #[test]
+    fn timestamp_parsing_date_only() {
+        // 2024-01-02T00:00:00Z
+        assert_eq!(parse_date("2024-01-02"), Ok(1_704_153_600));
     }
 
     #[test]
