@@ -72,45 +72,24 @@ jobs:
           name: archivr-${{ matrix.target }}
           path: archivr-${{ matrix.target }}.*
 
-  codeberg-release:
-    name: Upload to Codeberg Release
+  release:
+    name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
-      - name: Upload to Codeberg release
+      - name: Create release and upload assets
         env:
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-          CODEBERG_REPO: ${{ vars.CODEBERG_REPO }}
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          # Fetch existing release, or create one if it doesn't exist yet
-          RELEASE=$(curl -sf \
-            -H "Authorization: token $CODEBERG_TOKEN" \
-            "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases/tags/$TAG" 2>/dev/null) || true
-
-          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id // empty')
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo "No release found for $TAG — creating one on Codeberg..."
-            RELEASE=$(curl -sf -X POST \
-              -H "Authorization: token $CODEBERG_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"tag_name\": \"$TAG\", \"name\": \"$TAG\", \"draft\": false}" \
-              "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases")
-            RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --verify-tag
           fi
-
-          echo "Uploading assets to Codeberg release $RELEASE_ID..."
-          for file in archivr-*; do
-            echo "  $file"
-            curl -sf -X POST \
-              -H "Authorization: token $CODEBERG_TOKEN" \
-              -F "attachment=@$file" \
-              "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases/$RELEASE_ID/assets?name=$(basename "$file")"
-          done
-          echo "Done."
+          gh release upload "$TAG" archivr-* --repo "$GITHUB_REPOSITORY" --clobber

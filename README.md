@@ -4,7 +4,7 @@ A Tumblr backup tool.
 
 ## Installing
 
-Binary distributions are available at the [GitHub Actions "Build" job](https://github.com/rfaulhaber/archivr/actions).
+Binary distributions are available on the [GitHub Releases page](https://github.com/rfaulhaber/archivr/releases).
 
 You may also use `cargo install`, Nix, or compile the binary yourself.
 
@@ -18,7 +18,7 @@ This repository also provides a Nix flake. You can run the command by using:
 
 ```sh
 # or `nix shell` to add it to a shell
-nix run https://codeberg.org/ryf/archivr
+nix run github:rfaulhaber/archivr
 ```
 
 You can also add it to your Nix configuration that way.
@@ -34,7 +34,7 @@ In order to interact with the Tumblr API, archivr needs an OAuth consumer key an
 3. Click the green "Register application" button
 4. Fill out the following fields:
    1. **Application name**: archivr (this doesn't really matter, this is for your reference)
-   2. **Application website**: codeberg.org/ryf/archivr (again, doesn't really matter)
+   2. **Application website**: github.com/rfaulhaber/archivr (again, doesn't really matter)
    3. **Application description**: Tumblr backup tool
    4. **Administrative contact email**: your email
    5. **Default callback URL**: `http://localhost:6263/callback`
