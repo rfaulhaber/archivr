@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod cmd;
 pub mod config;
+pub mod fsutil;
 pub mod images;
 pub mod job;
 pub mod state;

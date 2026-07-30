@@ -149,7 +149,7 @@ async fn download_one(
         return Err(anyhow::anyhow!("HTTP {status} for {url}"));
     }
     let bytes = response.bytes().await?;
-    fs_err::write(dest, &bytes)?;
+    crate::fsutil::write_atomic(dest, &bytes)?;
     Ok(())
 }
 

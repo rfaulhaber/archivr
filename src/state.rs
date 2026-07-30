@@ -24,7 +24,7 @@ impl BackupState {
 
     pub fn save(&self, path: &Utf8Path) -> anyhow::Result<()> {
         let content = serde_json::to_string(self)?;
-        fs_err::write(path, content)?;
+        crate::fsutil::write_atomic(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -60,7 +60,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = std::env::temp_dir();
         let dir = Utf8Path::from_path(&dir).unwrap();
-        let path = dir.join("archivr-test-state.json");
+        let path = dir.join(format!("archivr-test-state-{}.json", std::process::id()));
 
         let state = sample_state();
         state.save(&path).unwrap();

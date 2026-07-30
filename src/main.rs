@@ -3,6 +3,7 @@ use std::io::Write;
 
 use archivr::{
     Args, BackupState, JobState, PostRenderer, PostTimestamp, ResolvedConfig, auth::authenticate,
+    fsutil::write_atomic,
     images::{collect_image_urls, download_images, rewrite_post_image_urls},
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
@@ -173,14 +174,21 @@ async fn main() -> anyhow::Result<()> {
         run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
 
     if let Some(newest_ts) = newest_observed {
+        let now = chrono::Utc::now().timestamp();
+        // Only floor against prior state from the same blog: a non-incremental
+        // run into another blog's directory must not inherit that blog's mark.
         let prior_high_water = prior_state
             .as_ref()
+            .filter(|s| s.blog_name == config.blog_name)
             .map(|s| s.newest_post_timestamp)
             .unwrap_or(0);
         let new_state = BackupState {
             blog_name: config.blog_name.clone(),
-            last_run_at: chrono::Utc::now().timestamp(),
-            newest_post_timestamp: newest_ts.max(prior_high_water),
+            last_run_at: now,
+            // Tumblr allows arbitrary post dates; cap the mark at the present
+            // so a single future-dated post can't push the incremental
+            // boundary past posts that haven't been written yet.
+            newest_post_timestamp: newest_ts.max(prior_high_water).min(now),
         };
         new_state.save(&state_file)?;
     }
@@ -196,7 +204,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A buffered HTML post waiting for its "older" nav link before being written to disk.
+/// An HTML post already on disk with [`OLDER_NAV_PLACEHOLDER`] still in place,
+/// kept in memory so the file can be rewritten with the real "older" nav link
+/// once its older neighbor is known.
 struct BufferedHtmlPost {
     content: String,
     output_file: camino::Utf8PathBuf,
@@ -213,10 +223,10 @@ fn post_relative_href(post_id: &str, directories: bool) -> String {
     }
 }
 
-/// Replace the older-nav placeholder with the real link and write the file to disk.
+/// Replace the older-nav placeholder with the real link and rewrite the file on disk.
 fn finalize_buffered_post(buf: &BufferedHtmlPost, older_html: &str) -> anyhow::Result<()> {
     let final_content = buf.content.replace(OLDER_NAV_PLACEHOLDER, older_html);
-    fs_err::write(&buf.output_file, &final_content)?;
+    write_atomic(&buf.output_file, final_content.as_bytes())?;
     Ok(())
 }
 
@@ -271,11 +281,11 @@ async fn run_backup(
 
         log::info!("({}) Fetching next batch of posts...", job.offset,);
 
-        if newest_observed.is_none() {
-            // Tumblr returns posts newest-first. The first post of the first
-            // non-empty batch is our high-water mark for incremental runs.
-            newest_observed = post_response.posts.iter().map(|p| p.timestamp).max();
-        }
+        // Tumblr never documents a sort order for `after`-filtered queries, so
+        // fold the max over every batch rather than trusting the first batch
+        // to hold the newest post.
+        let batch_newest = post_response.posts.iter().map(|p| p.timestamp).max();
+        newest_observed = newest_observed.max(batch_newest);
 
         for post in &post_response.posts {
             log::info!("processing post {}", post.id);
@@ -314,7 +324,7 @@ async fn run_backup(
                 } else {
                     config.output_dir.join(format!("{}.json", post.id))
                 };
-                fs_err::write(&output_file, &content)?;
+                write_atomic(&output_file, content.as_bytes())?;
                 log::debug!("saved post {} to {}", post.id, output_file);
             } else {
                 // HTML mode: buffer for nav link injection
@@ -335,6 +345,14 @@ async fn run_backup(
                 };
 
                 let current_href = post_relative_href(&post.id, config.directories);
+
+                // Persist this post before the batch's offset can be saved past
+                // it: the placeholder is an HTML comment, so the on-disk copy
+                // is complete minus the "older" link, and an interrupt at any
+                // point loses nothing. Written before the previous post gains
+                // its "older" link so no on-disk link ever targets a missing
+                // file.
+                write_atomic(&output_file, content.as_bytes())?;
 
                 // Finalize the previous buffered post now that we know its "older" neighbor
                 if let Some(prev) = buffered.take() {
@@ -363,11 +381,10 @@ async fn run_backup(
     }
     .await;
 
-    // Flush any buffered HTML post to disk before returning, so an interrupted
-    // run (e.g. a rate limit) doesn't drop the last in-memory post. On the
-    // normal exit this is the genuinely-oldest post; on an error path its older
-    // neighbour may only be fetched on a later --resume run. Either way it has
-    // no known older link yet, so emit an empty older-nav placeholder.
+    // The last processed post is already on disk but still carries the nav
+    // placeholder; swap in an empty older slot. On the normal exit this is the
+    // genuinely-oldest post; on an error path (e.g. a rate limit) its older
+    // neighbour may only be fetched on a later --resume run.
     if let Some(last) = buffered.take() {
         finalize_buffered_post(&last, "<span></span>")?;
     }
