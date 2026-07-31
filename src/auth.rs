@@ -120,10 +120,12 @@ async fn interactive_auth(
             Ok(()) => log::debug!("opened browser for authentication"),
             Err(_e) => log::debug!("could not open browser automatically"),
         }
-        crate::capture_callback().await?
+        crate::capture_callback(csrf_token.secret()).await?
     };
 
-    // Verify CSRF state parameter
+    // Verify CSRF state parameter. Tumblr always echoes `state`, so a callback
+    // without one cannot be a genuine redirect — treat it as hostile rather
+    // than skipping verification.
     match state {
         Some(ref s) if s != csrf_token.secret() => {
             return Err(crate::ArchivrError::CsrfMismatch {
@@ -132,9 +134,7 @@ async fn interactive_auth(
             }
             .into());
         }
-        None => {
-            log::warn!("no state parameter in OAuth callback; skipping CSRF verification");
-        }
+        None => return Err(crate::ArchivrError::MissingCsrfState.into()),
         Some(_) => {}
     }
 
@@ -170,7 +170,7 @@ fn parse_cookie_file(path: &Utf8Path) -> anyhow::Result<Arc<CookieJar>> {
         .parse()
         .map_err(|e| anyhow::anyhow!("failed to parse tumblr URL: {e}"))?;
 
-    for line in contents.lines() {
+    for (lineno, line) in contents.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -185,7 +185,14 @@ fn parse_cookie_file(path: &Utf8Path) -> anyhow::Result<Arc<CookieJar>> {
 
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 7 {
-            log::warn!("skipping malformed cookie line: {line}");
+            // Identify the line by number only: any slice of a malformed line
+            // (including its first "field", which for a tab-less line is the
+            // whole line) can still contain a live session cookie value.
+            log::warn!(
+                "skipping malformed cookie line {} ({} fields, expected 7)",
+                lineno + 1,
+                fields.len()
+            );
             continue;
         }
 
@@ -231,43 +238,57 @@ pub async fn authenticate(
 
     if fs_err::exists(&auth_file_path)? {
         let auth_str = fs_err::read_to_string(&auth_file_path)?;
-        let auth: Auth = serde_json::from_str(&auth_str)?;
+        // A corrupt token file shouldn't dead-end the tool: fall back to
+        // interactive auth (which rewrites it) with a visible notice.
+        let auth: Option<Auth> = match serde_json::from_str(&auth_str) {
+            Ok(auth) => Some(auth),
+            Err(e) => {
+                writeln!(
+                    std::io::stdout(),
+                    "Saved authentication at {auth_file_path} is unreadable ({e}); \
+                     re-running interactive authentication."
+                )?;
+                None
+            }
+        };
 
-        if !auth.is_expired() {
-            return build_client(
-                consumer_key,
-                consumer_secret,
-                &auth.access_token,
-                cookie_jar,
-                dashboard,
-            );
-        }
+        if let Some(auth) = auth {
+            if !auth.is_expired() {
+                return build_client(
+                    consumer_key,
+                    consumer_secret,
+                    &auth.access_token,
+                    cookie_jar,
+                    dashboard,
+                );
+            }
 
-        // Token is expired — try refreshing
-        if let Some(refresh_token) = auth.refresh_token.clone() {
-            log::info!("access token expired, attempting refresh");
-            let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
-            match oauth_config.refresh_access_token(refresh_token).await {
-                Ok(new_token) => {
-                    let expires_at = compute_expires_at(&new_token);
-                    // Preserve old refresh token if the server didn't issue a new one
-                    let refresh_token = new_token.refresh_token.or(auth.refresh_token);
-                    let refreshed_auth = Auth {
-                        access_token: new_token.access_token,
-                        refresh_token,
-                        expires_at,
-                    };
-                    save_auth(&refreshed_auth, &auth_file_path)?;
-                    return build_client(
-                        consumer_key,
-                        consumer_secret,
-                        &refreshed_auth.access_token,
-                        cookie_jar,
-                        dashboard,
-                    );
-                }
-                Err(e) => {
-                    log::warn!("token refresh failed: {e}, falling back to interactive auth");
+            // Token is expired — try refreshing
+            if let Some(refresh_token) = auth.refresh_token.clone() {
+                log::info!("access token expired, attempting refresh");
+                let oauth_config = make_oauth_config(consumer_key, consumer_secret)?;
+                match oauth_config.refresh_access_token(refresh_token).await {
+                    Ok(new_token) => {
+                        let expires_at = compute_expires_at(&new_token);
+                        // Preserve old refresh token if the server didn't issue a new one
+                        let refresh_token = new_token.refresh_token.or(auth.refresh_token);
+                        let refreshed_auth = Auth {
+                            access_token: new_token.access_token,
+                            refresh_token,
+                            expires_at,
+                        };
+                        save_auth(&refreshed_auth, &auth_file_path)?;
+                        return build_client(
+                            consumer_key,
+                            consumer_secret,
+                            &refreshed_auth.access_token,
+                            cookie_jar,
+                            dashboard,
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("token refresh failed: {e}, falling back to interactive auth");
+                    }
                 }
             }
         }

@@ -3,11 +3,29 @@ use serde::Deserialize;
 
 use crate::{ArchivrError, Args, JobState, PostTimestamp};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     pub blog_name: String,
     pub consumer_key: Option<String>,
     pub consumer_secret: Option<String>,
+}
+
+/// Manual impl so debug-logging a `Config` can never leak the OAuth
+/// credentials read from the config file.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("blog_name", &self.blog_name)
+            .field(
+                "consumer_key",
+                &self.consumer_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "consumer_secret",
+                &self.consumer_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 pub struct ResolvedConfig {

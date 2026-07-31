@@ -104,7 +104,10 @@ pub const OLDER_NAV_PLACEHOLDER: &str = "<!-- ARCHIVR:OLDER_NAV -->";
 
 /// Builds the HTML for an "Older" navigation link, to be substituted for [`OLDER_NAV_PLACEHOLDER`].
 pub fn build_older_nav_link(href: &str) -> String {
-    format!(r#"<a href="{href}">Older &rarr;</a>"#, href = html_escape(href))
+    format!(
+        r#"<a href="{href}">Older &rarr;</a>"#,
+        href = html_escape(href)
+    )
 }
 
 /// Renders NPF text together with its inline formatting ranges into escaped HTML.
@@ -148,7 +151,9 @@ fn render_formatted_text(text: &str, formatting: &[InlineFormat]) -> String {
         for (open, _) in &tags {
             html.push_str(open);
         }
-        html.push_str(&html_escape(&String::from_utf16_lossy(&units[seg_start..seg_end])));
+        html.push_str(&html_escape(&String::from_utf16_lossy(
+            &units[seg_start..seg_end],
+        )));
         for (_, close) in tags.iter().rev() {
             html.push_str(close);
         }
@@ -214,7 +219,9 @@ fn sanitize_url(url: &str) -> String {
 /// in a `style` attribute without risking CSS injection.
 fn is_hex_color(s: &str) -> bool {
     match s.strip_prefix('#') {
-        Some(rest) => (rest.len() == 3 || rest.len() == 6) && rest.bytes().all(|b| b.is_ascii_hexdigit()),
+        Some(rest) => {
+            (rest.len() == 3 || rest.len() == 6) && rest.bytes().all(|b| b.is_ascii_hexdigit())
+        }
         None => false,
     }
 }
@@ -756,7 +763,10 @@ fn render_block_from_value(block: &Value) -> String {
             if let Ok(desc) = block.get_attr("description")
                 && let Some(desc_str) = desc.as_str()
             {
-                html.push_str(&format!("<p>{desc_str}</p>", desc_str = html_escape(desc_str)));
+                html.push_str(&format!(
+                    "<p>{desc_str}</p>",
+                    desc_str = html_escape(desc_str)
+                ));
             }
             html.push_str("</div>");
             html

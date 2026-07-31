@@ -51,25 +51,25 @@ This will kick off a job to back up an entire blog.
 
 ### CLI flags
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--consumer-key` | | Tumblr OAuth consumer key |
-| `--consumer-secret` | | Tumblr OAuth consumer secret |
-| `--config-file` | | Path to a JSON config file with `blog_name`, `consumer_key`, and `consumer_secret` |
-| `--output-dir` | `-o` | Output directory (defaults to `./{blog_name}`) |
-| `--json` | | Save posts as raw JSON instead of HTML |
-| `--template` | `-t` | Custom Jinja template for HTML output (exclusive with `--json`) |
-| `--directories` | `-d` | Create a subdirectory for each post |
-| `--save-images` | | Download post images locally instead of linking to CDN |
-| `--before` | | Only fetch posts before this date (Unix timestamp or RFC3339) |
-| `--after` | | Only fetch posts after this date (Unix timestamp or RFC3339) |
-| `--resume` | | Resume a previously interrupted backup |
-| `--incremental` | | Fetch only posts newer than the last successful backup |
-| `--quiet` | `-q` | Suppress progress output |
-| `--reauth` | | Force re-authentication, ignoring saved tokens |
-| `--cookies-file` | | Path to a Netscape/Mozilla-format cookies file for dashboard access |
-| `--dashboard` | | Use Tumblr's internal dashboard API (requires `--cookies-file`) |
-| `--headless` | | Manual auth flow for environments without a browser (servers, containers) |
+| Flag                | Short | Description                                                                        |
+|---------------------|-------|------------------------------------------------------------------------------------|
+| `--consumer-key`    |       | Tumblr OAuth consumer key                                                          |
+| `--consumer-secret` |       | Tumblr OAuth consumer secret                                                       |
+| `--config-file`     |       | Path to a JSON config file with `blog_name`, `consumer_key`, and `consumer_secret` |
+| `--output-dir`      | `-o`  | Output directory (defaults to `./{blog_name}`)                                     |
+| `--json`            |       | Save posts as raw JSON instead of HTML                                             |
+| `--template`        | `-t`  | Custom Jinja template for HTML output (exclusive with `--json`)                    |
+| `--directories`     | `-d`  | Create a subdirectory for each post                                                |
+| `--save-images`     |       | Download post images locally instead of linking to CDN                             |
+| `--before`          |       | Only fetch posts before this date (Unix timestamp or RFC3339)                      |
+| `--after`           |       | Only fetch posts after this date (Unix timestamp or RFC3339)                       |
+| `--resume`          |       | Resume a previously interrupted backup                                             |
+| `--incremental`     |       | Fetch only posts newer than the last successful backup                             |
+| `--quiet`           | `-q`  | Suppress progress output                                                           |
+| `--reauth`          |       | Force re-authentication, ignoring saved tokens                                     |
+| `--cookies-file`    |       | Path to a Netscape/Mozilla-format cookies file for dashboard access                |
+| `--dashboard`       |       | Use Tumblr's internal dashboard API (requires `--cookies-file`)                    |
+| `--headless`        |       | Manual auth flow for environments without a browser (servers, containers)          |
 
 ### Headless / server usage
 
@@ -134,30 +134,30 @@ Your template receives the following variables:
 
 Access these as `{{ post.field_name }}`:
 
-| Field | Type | Description |
-|---|---|---|
-| `id` | int | The post ID |
-| `blog_name` | string | Name of the blog |
-| `post_url` | string | Full URL to the post on Tumblr |
-| `post_type` | string | Post type (e.g. `"text"`, `"photo"`) |
-| `original_type` | string | Original post type before conversion |
-| `timestamp` | int | Unix timestamp |
-| `date` | string | Human-readable date |
-| `content` | list | Content blocks (see below) |
-| `trail` | list | Reblog trail items |
-| `tags` | list | List of tag strings |
-| `summary` | string | Post summary text |
-| `note_count` | int | Number of notes |
-| `slug` | string | URL slug |
-| `short_url` | string | Short URL |
-| `reblog_key` | string | Reblog key |
-| `state` | string | Post state (e.g. `"published"`) |
-| `reblogged_from_name` | string? | Blog name this was reblogged from |
-| `reblogged_from_url` | string? | URL of the blog this was reblogged from |
-| `reblogged_root_name` | string? | Original post's blog name |
-| `reblogged_root_url` | string? | Original post's blog URL |
-| `liked` | bool | Whether you liked the post |
-| `followed` | bool | Whether you follow the blog |
+| Field                 | Type    | Description                             |
+|-----------------------|---------|-----------------------------------------|
+| `id`                  | int     | The post ID                             |
+| `blog_name`           | string  | Name of the blog                        |
+| `post_url`            | string  | Full URL to the post on Tumblr          |
+| `post_type`           | string  | Post type (e.g. `"text"`, `"photo"`)    |
+| `original_type`       | string  | Original post type before conversion    |
+| `timestamp`           | int     | Unix timestamp                          |
+| `date`                | string  | Human-readable date                     |
+| `content`             | list    | Content blocks (see below)              |
+| `trail`               | list    | Reblog trail items                      |
+| `tags`                | list    | List of tag strings                     |
+| `summary`             | string  | Post summary text                       |
+| `note_count`          | int     | Number of notes                         |
+| `slug`                | string  | URL slug                                |
+| `short_url`           | string  | Short URL                               |
+| `reblog_key`          | string  | Reblog key                              |
+| `state`               | string  | Post state (e.g. `"published"`)         |
+| `reblogged_from_name` | string? | Blog name this was reblogged from       |
+| `reblogged_from_url`  | string? | URL of the blog this was reblogged from |
+| `reblogged_root_name` | string? | Original post's blog name               |
+| `reblogged_root_url`  | string? | Original post's blog URL                |
+| `liked`               | bool    | Whether you liked the post              |
+| `followed`            | bool    | Whether you follow the blog             |
 
 #### Content blocks
 
@@ -276,4 +276,3 @@ The following features are not yet implemented but are planned for future releas
 - Tag filtering (`--include-tags`)
 - Notes backup (`--save-notes`)
 - Index page generation (`--index-file`)
-- Automatic rate limit retry with backoff

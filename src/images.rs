@@ -8,7 +8,15 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 /// Maximum number of concurrent image downloads.
-const MAX_CONCURRENT_DOWNLOADS: usize = 6;
+pub const MAX_CONCURRENT_DOWNLOADS: usize = 6;
+
+/// Total per-request deadline (connect through body). Mirrors tumblr-utils'
+/// 90-second HTTP timeout; without one a stalled CDN connection hangs the
+/// backup forever.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Retries after the initial attempt, on transient failures only.
+const MAX_DOWNLOAD_RETRIES: u32 = 3;
 
 /// Collects all image URLs from a post's content and trail.
 pub fn collect_image_urls(post: &Post) -> Vec<String> {
@@ -58,14 +66,17 @@ pub fn local_filename_for_url(url: &str) -> String {
 
 /// Downloads images concurrently and returns a mapping of original URL to local relative path.
 ///
-/// Only successful downloads appear in the returned map. Failed downloads are logged
-/// and omitted so that original CDN URLs are preserved in the output.
+/// Only successful downloads appear in the returned map. Individual failed
+/// downloads are logged and omitted so that original CDN URLs are preserved in
+/// the output. Failure to create the media directory is a hard error: it would
+/// silently turn `--save-images` into a CDN-linked archive.
 pub async fn download_images(
     client: &reqwest::Client,
     urls: &[String],
     media_dir: &Utf8Path,
     relative_prefix: &str,
-) -> HashMap<String, String> {
+    semaphore: &std::sync::Arc<Semaphore>,
+) -> anyhow::Result<HashMap<String, String>> {
     // Deduplicate URLs
     let unique_urls: Vec<&String> = {
         let mut seen = std::collections::HashSet::new();
@@ -73,17 +84,15 @@ pub async fn download_images(
     };
 
     if unique_urls.is_empty() {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
 
-    if !fs_err::exists(media_dir).unwrap_or(false)
-        && let Err(e) = fs_err::create_dir_all(media_dir)
-    {
-        log::warn!("Failed to create media directory {media_dir}: {e}");
-        return HashMap::new();
+    if !fs_err::exists(media_dir).unwrap_or(false) {
+        fs_err::create_dir_all(media_dir).map_err(|e| {
+            anyhow::anyhow!("failed to create media directory (required by --save-images): {e}")
+        })?;
     }
 
-    let semaphore = std::sync::Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
     let mut join_set = tokio::task::JoinSet::new();
 
     for url in unique_urls {
@@ -130,26 +139,67 @@ pub async fn download_images(
 
     let mut url_map = HashMap::new();
     while let Some(result) = join_set.join_next().await {
-        if let Ok(Some((url, path))) = result {
-            url_map.insert(url, path);
+        match result {
+            Ok(Some((url, path))) => {
+                url_map.insert(url, path);
+            }
+            Ok(None) => {}
+            // A panicked/cancelled task must not be silent: the post will
+            // keep its CDN link and the user should know why.
+            Err(e) => log::warn!("image download task failed: {e}"),
         }
     }
 
-    url_map
+    Ok(url_map)
 }
 
-async fn download_one(
+async fn download_one(client: &reqwest::Client, url: &str, dest: &Utf8Path) -> anyhow::Result<()> {
+    let mut attempt: u32 = 0;
+    loop {
+        let (transient, error) = match try_download(client, url, dest).await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        attempt += 1;
+        if !transient || attempt > MAX_DOWNLOAD_RETRIES {
+            return Err(error);
+        }
+        let backoff = 1u64 << (attempt - 1);
+        log::debug!(
+            "transient failure downloading {url} ({error}); retrying in {backoff}s \
+             (attempt {attempt}/{MAX_DOWNLOAD_RETRIES})"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+    }
+}
+
+/// One download attempt. The error's `bool` distinguishes transient failures
+/// (worth retrying: transport errors, timeouts, gateway 5xx) from permanent
+/// ones (4xx, disk errors).
+async fn try_download(
     client: &reqwest::Client,
     url: &str,
     dest: &Utf8Path,
-) -> anyhow::Result<()> {
-    let response = client.get(url).send().await?;
+) -> Result<(), (bool, anyhow::Error)> {
+    let response = client
+        .get(url)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| (true, anyhow::Error::new(e)))?;
+
     let status = response.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!("HTTP {status} for {url}"));
+        let transient = matches!(status.as_u16(), 500 | 502 | 503 | 504);
+        return Err((transient, anyhow::anyhow!("HTTP {status} for {url}")));
     }
-    let bytes = response.bytes().await?;
-    crate::fsutil::write_atomic(dest, &bytes)?;
+
+    // The request-level timeout above covers the body read as well.
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| (true, anyhow::Error::new(e)))?;
+    crate::fsutil::write_atomic(dest, &bytes).map_err(|e| (false, anyhow::Error::new(e)))?;
     Ok(())
 }
 

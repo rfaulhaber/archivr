@@ -9,7 +9,7 @@ fn non_empty_string(s: &str) -> Result<String, String> {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
     #[arg(help = "Name of the Tumblr blog to back up", value_parser = non_empty_string)]
@@ -103,6 +103,40 @@ pub struct Args {
     pub headless: bool,
 }
 
+/// Manual impl so `RUST_LOG=debug` output (the first thing users paste into
+/// bug reports) never contains the OAuth credentials.
+impl std::fmt::Debug for Args {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn redact(secret: &Option<String>) -> &'static str {
+            match secret {
+                Some(_) => "Some(<redacted>)",
+                None => "None",
+            }
+        }
+
+        f.debug_struct("Args")
+            .field("blog_name", &self.blog_name)
+            .field("consumer_key", &redact(&self.consumer_key))
+            .field("consumer_secret", &redact(&self.consumer_secret))
+            .field("config_file", &self.config_file)
+            .field("resume", &self.resume)
+            .field("incremental", &self.incremental)
+            .field("template", &self.template)
+            .field("directories", &self.directories)
+            .field("save_images", &self.save_images)
+            .field("json", &self.json)
+            .field("output_dir", &self.output_dir)
+            .field("before", &self.before)
+            .field("after", &self.after)
+            .field("quiet", &self.quiet)
+            .field("reauth", &self.reauth)
+            .field("cookies_file", &self.cookies_file)
+            .field("dashboard", &self.dashboard)
+            .field("headless", &self.headless)
+            .finish()
+    }
+}
+
 fn parse_date(s: &str) -> Result<i64, String> {
     if let Some(rest) = s.strip_prefix('@') {
         return rest
@@ -151,6 +185,23 @@ mod tests {
     fn timestamp_parsing_date_only() {
         // 2024-01-02T00:00:00Z
         assert_eq!(parse_date("2024-01-02"), Ok(1_704_153_600));
+    }
+
+    #[test]
+    fn debug_output_redacts_credentials() {
+        let args = Args::parse_from([
+            "archivr",
+            "myblog",
+            "--consumer-key",
+            "key-sensitive-value",
+            "--consumer-secret",
+            "secret-sensitive-value",
+        ]);
+        let debug = format!("{args:?}");
+        assert!(!debug.contains("key-sensitive-value"));
+        assert!(!debug.contains("secret-sensitive-value"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("myblog"));
     }
 
     #[test]

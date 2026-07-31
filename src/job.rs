@@ -8,8 +8,33 @@ pub const JOB_FILE_PATH: &str = ".archivr-job.json";
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JobState {
     pub blog_name: String,
-    pub offset: u64,
     pub started_at: PostTimestamp,
+    /// Pagination cursor: the next page holds posts older than this timestamp.
+    /// `None` marks a job that has not fetched its first page yet — or a job
+    /// file from a pre-cursor archivr version (those carried an `offset` field,
+    /// which serde ignores here), in which case the run re-scans the window
+    /// from the top and reuses already-written files.
+    #[serde(default)]
+    pub before_cursor: Option<PostTimestamp>,
+    /// Page offset *within* the current `before_cursor` window; only nonzero
+    /// while walking a run of posts that share one second-granularity
+    /// timestamp, where the cursor alone cannot advance.
+    #[serde(default)]
+    pub window_offset: u64,
+    /// Ids of the most recently committed page. The next window re-includes
+    /// the boundary second by design; on `--resume` these seed the seen-set so
+    /// already-written files are not rewritten with a severed nav chain.
+    #[serde(default)]
+    pub last_page_ids: Vec<String>,
+    /// Relative href of the last HTML post written, so the first post of a
+    /// resumed run can still link "newer" across the process boundary.
+    #[serde(default)]
+    pub last_post_href: Option<String>,
+    /// Output file of the last HTML post written. Its "older" nav slot still
+    /// holds the placeholder on an interrupted run; a resumed run finalizes it
+    /// against the first post it writes.
+    #[serde(default)]
+    pub last_post_file: Option<Utf8PathBuf>,
     #[serde(default)]
     pub before: Option<PostTimestamp>,
     #[serde(default)]
@@ -28,8 +53,12 @@ impl JobState {
     pub fn new(config: &ResolvedConfig) -> Self {
         Self {
             blog_name: config.blog_name.clone(),
-            offset: 0,
             started_at: chrono::Utc::now().timestamp(),
+            before_cursor: None,
+            window_offset: 0,
+            last_page_ids: Vec::new(),
+            last_post_href: None,
+            last_post_file: None,
             before: config.before,
             after: config.after,
             json: config.json,
@@ -69,8 +98,12 @@ mod tests {
     fn sample_job() -> JobState {
         JobState {
             blog_name: "test-blog".to_owned(),
-            offset: 42,
             started_at: 1700000000,
+            before_cursor: Some(1699990000),
+            window_offset: 40,
+            last_page_ids: vec!["101".to_owned(), "100".to_owned()],
+            last_post_href: Some("100.html".to_owned()),
+            last_post_file: Some(Utf8PathBuf::from("/tmp/out/100.html")),
             before: Some(1700001000),
             after: Some(1699999000),
             json: true,
@@ -86,8 +119,15 @@ mod tests {
         let json = serde_json::to_string(&job).unwrap();
         let deserialized: JobState = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.blog_name, "test-blog");
-        assert_eq!(deserialized.offset, 42);
         assert_eq!(deserialized.started_at, 1700000000);
+        assert_eq!(deserialized.before_cursor, Some(1699990000));
+        assert_eq!(deserialized.window_offset, 40);
+        assert_eq!(deserialized.last_page_ids, vec!["101", "100"]);
+        assert_eq!(deserialized.last_post_href.as_deref(), Some("100.html"));
+        assert_eq!(
+            deserialized.last_post_file,
+            Some(Utf8PathBuf::from("/tmp/out/100.html"))
+        );
         assert_eq!(deserialized.before, Some(1700001000));
         assert_eq!(deserialized.after, Some(1699999000));
         assert!(deserialized.json);
@@ -102,15 +142,33 @@ mod tests {
     #[test]
     fn deserialization_defaults() {
         // Minimal JSON with only the required fields — optional fields should default
-        let json = r#"{"blog_name":"b","offset":0,"started_at":100}"#;
+        let json = r#"{"blog_name":"b","started_at":100}"#;
         let job: JobState = serde_json::from_str(json).unwrap();
         assert_eq!(job.blog_name, "b");
+        assert_eq!(job.before_cursor, None);
+        assert_eq!(job.window_offset, 0);
+        assert!(job.last_page_ids.is_empty());
+        assert_eq!(job.last_post_href, None);
+        assert_eq!(job.last_post_file, None);
         assert_eq!(job.before, None);
         assert_eq!(job.after, None);
         assert!(!job.json);
         assert!(!job.directories);
         assert!(!job.save_images);
         assert_eq!(job.template_path, None);
+    }
+
+    #[test]
+    fn deserializes_legacy_offset_job_file() {
+        // A job file written by a pre-cursor archivr carries `offset`; it must
+        // still load (offset ignored, cursor defaults to None → window rescan).
+        let json = r#"{"blog_name":"b","offset":120,"started_at":100,"json":true}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.blog_name, "b");
+        assert_eq!(job.started_at, 100);
+        assert_eq!(job.before_cursor, None);
+        assert_eq!(job.window_offset, 0);
+        assert!(job.json);
     }
 
     #[test]
@@ -124,7 +182,8 @@ mod tests {
 
         let loaded = JobState::load(&path).unwrap();
         assert_eq!(loaded.blog_name, job.blog_name);
-        assert_eq!(loaded.offset, job.offset);
+        assert_eq!(loaded.before_cursor, job.before_cursor);
+        assert_eq!(loaded.window_offset, job.window_offset);
         assert_eq!(loaded.before, job.before);
         assert_eq!(loaded.save_images, job.save_images);
 

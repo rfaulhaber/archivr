@@ -24,6 +24,10 @@ pub const DEFAULT_CALLBACK_PORT: u16 = 6263;
 /// How long to wait for the browser to hit the OAuth callback before giving up.
 const CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Per-connection read deadline, so one stalled local connection can't hold
+/// the listener (and with it the whole auth flow) until [`CALLBACK_TIMEOUT`].
+const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub type PostTimestamp = i64;
 
 #[derive(Debug, Error)]
@@ -38,12 +42,26 @@ pub enum ArchivrError {
     NoConsumerSecret,
     #[error("CSRF state mismatch: expected {expected}, got {actual}")]
     CsrfMismatch { expected: String, actual: String },
+    #[error(
+        "OAuth callback did not include the CSRF state parameter, so it cannot \
+         have come from Tumblr. Refusing the authorization code; re-run to \
+         authenticate again."
+    )]
+    MissingCsrfState,
 }
 
-pub async fn capture_callback() -> anyhow::Result<(String, Option<String>)> {
-    let listener = TcpListener::bind(("127.0.0.1", DEFAULT_CALLBACK_PORT)).await?;
+pub async fn capture_callback(expected_state: &str) -> anyhow::Result<(String, Option<String>)> {
+    let listener = TcpListener::bind(("127.0.0.1", DEFAULT_CALLBACK_PORT))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not listen on 127.0.0.1:{DEFAULT_CALLBACK_PORT} for the OAuth \
+                 callback ({e}). Another archivr instance may be mid-authentication, \
+                 or another program is using the port."
+            )
+        })?;
 
-    tokio::time::timeout(CALLBACK_TIMEOUT, accept_callback(&listener))
+    tokio::time::timeout(CALLBACK_TIMEOUT, accept_callback(&listener, expected_state))
         .await
         .map_err(|_| {
             anyhow::anyhow!(
@@ -54,10 +72,36 @@ pub async fn capture_callback() -> anyhow::Result<(String, Option<String>)> {
         })?
 }
 
-/// Accepts connections until one carries a real HTTP request line, then replies
-/// and returns the parsed code/state. Empty sockets (some browsers speculatively
-/// pre-connect) are ignored so they don't abort the flow.
-async fn accept_callback(listener: &TcpListener) -> anyhow::Result<(String, Option<String>)> {
+/// Best-effort: the HTTP response is purely cosmetic (the browser tab's
+/// success/failure page), so a peer that has already hung up must not be able
+/// to fail the auth flow.
+async fn write_response(
+    writer: &mut tokio::net::tcp::WriteHalf<'_>,
+    status_line: &str,
+    body: &str,
+) {
+    let response = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    if let Err(e) = writer.write_all(response.as_bytes()).await {
+        log::debug!("failed to write OAuth callback response: {e}");
+    }
+}
+
+/// Accepts connections until one carries an OAuth callback bearing this
+/// session's CSRF `state`, then replies and returns the parsed code/state.
+///
+/// The port is fixed and world-connectable on loopback, so only a request that
+/// proves it came through Tumblr — by echoing our `state` (RFC 6749 echoes it
+/// on error redirects too) — may terminate the flow, whether with a code or a
+/// genuine `error=` denial. Everything else (empty pre-connect sockets, port
+/// scanners, forged error/code injections without the state) gets a 404 and
+/// the listener keeps waiting.
+async fn accept_callback(
+    listener: &TcpListener,
+    expected_state: &str,
+) -> anyhow::Result<(String, Option<String>)> {
     loop {
         let (mut stream, _) = listener.accept().await?;
         let (reader, mut writer) = stream.split();
@@ -65,25 +109,68 @@ async fn accept_callback(listener: &TcpListener) -> anyhow::Result<(String, Opti
 
         // Read the request line: GET /callback?code=xyz&state=abc HTTP/1.1
         let mut request_line = String::new();
-        let bytes_read = reader.read_line(&mut request_line).await?;
+        let bytes_read = match tokio::time::timeout(
+            CONNECTION_READ_TIMEOUT,
+            reader.read_line(&mut request_line),
+        )
+        .await
+        {
+            Ok(Ok(n)) => n,
+            // A peer that resets mid-request is a stray connection, not a
+            // failure of the auth flow.
+            Ok(Err(e)) => {
+                log::debug!("ignoring unreadable connection on the OAuth port: {e}");
+                continue;
+            }
+            Err(_elapsed) => {
+                log::debug!("ignoring stalled connection on the OAuth port");
+                continue;
+            }
+        };
         if bytes_read == 0 || request_line.trim().is_empty() {
             continue;
         }
 
-        // Extract the code and state from the query string
-        let code_and_state = parse_code_from_request(&request_line)?;
+        let state_matches =
+            request_query_param(&request_line, "state").is_some_and(|s| s == expected_state);
 
-        // Send a minimal response
-        let body = "<h1>Success!</h1><p>You can close this tab.</p>";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        writer.write_all(response.as_bytes()).await?;
-
-        return Ok(code_and_state);
+        match parse_code_from_request(&request_line) {
+            Ok(code_and_state) if state_matches => {
+                let body = "<h1>Success!</h1><p>You can close this tab.</p>";
+                write_response(&mut writer, "200 OK", body).await;
+                return Ok(code_and_state);
+            }
+            Err(e)
+                if state_matches
+                    && e.downcast_ref::<ArchivrError>()
+                        .is_some_and(|e| matches!(e, ArchivrError::OAuth(_))) =>
+            {
+                let body = "<h1>Authentication failed</h1><p>You can close this tab.</p>";
+                write_response(&mut writer, "400 Bad Request", body).await;
+                return Err(e);
+            }
+            Ok(_) | Err(_) => {
+                log::debug!(
+                    "ignoring request on the OAuth port without a matching state parameter"
+                );
+                write_response(&mut writer, "404 Not Found", "").await;
+            }
+        }
     }
+}
+
+/// Extracts a single query parameter from an HTTP request line, if present.
+fn request_query_param(request_line: &str, key: &str) -> Option<String> {
+    let path = request_line.split_whitespace().nth(1)?;
+    let query = path.split_once('?').map(|(_, q)| q)?;
+    for pair in query.split('&') {
+        if let Some((k, value)) = pair.split_once('=')
+            && k == key
+        {
+            return urlencoding::decode(value).ok().map(|v| v.into_owned());
+        }
+    }
+    None
 }
 
 /// Extracts the authorization code and optional state from a query string.
