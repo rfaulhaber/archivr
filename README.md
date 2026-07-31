@@ -49,6 +49,12 @@ archivr <BLOG_NAME> --consumer-key <YOUR CONSUMER KEY> --consumer-secret <YOUR C
 
 This will kick off a job to back up an entire blog.
 
+Several blogs can be backed up in one invocation — each goes to its own output directory (subdirectories of `--output-dir` if one is given, `./{blog_name}` otherwise), and a failure on one blog doesn't stop the others:
+
+```sh
+archivr blog-one blog-two blog-three --consumer-key KEY --consumer-secret SECRET
+```
+
 ### CLI flags
 
 | Flag                | Short | Description                                                                        |
@@ -75,6 +81,14 @@ This will kick off a job to back up an entire blog.
 | `--save-audio`      |       | Download native Tumblr audio files locally instead of linking to CDN               |
 | `--save-video-external` |   | Download external video embeds (YouTube, Vimeo, ...) with `yt-dlp`, if installed   |
 | `--index-file`      |       | Generate an `index.html` linking all archived posts, grouped by month              |
+| `--count`           |       | Back up at most N posts (newest first)                                             |
+| `--skip`            |       | Skip the N newest posts before backing up                                          |
+| `--save-avatar`     |       | Also download the blog's avatar into the output directory                          |
+| `--media-list`      |       | Write `media-list.jsonl` mapping each archived post's id to its media URLs         |
+| `--post-id`         |       | Back up only these posts (comma-separated ids) instead of paginating               |
+| `--id-file`         |       | Back up only the post ids listed in this file (one per line)                       |
+| `--wayback`         |       | Retry dead media URLs (403/404) through the Internet Archive's Wayback Machine     |
+| `--no-embeds`       |       | Render external embeds (YouTube, Vimeo, ...) as plain links instead of provider HTML |
 | `--before`          |       | Only fetch posts before this date (Unix timestamp or RFC3339)                      |
 | `--after`           |       | Only fetch posts after this date (Unix timestamp or RFC3339)                       |
 | `--resume`          |       | Resume a previously interrupted backup                                             |
@@ -164,6 +178,41 @@ Externally hosted embeds (YouTube, Vimeo, ...) can't be fetched directly. With `
 `--index-file` generates an `index.html` at the archive root listing every archived post, grouped by month with dates, titles, and tags, plus links to any special-collection subdirectories. The index is regenerated at the end of every run — including `--incremental` and `--resume` ones — from a persistent `.archivr-index.json` metadata file that accumulates across runs.
 
 For archives created before this flag existed, run one full (non-incremental) backup with `--index-file` to populate the metadata.
+
+### Partial backups
+
+`--count N` stops after archiving the `N` newest posts, and `--skip N` skips the newest `N` before archiving starts; both persist across `--resume`. Because a count/skip run covers only a slice of the blog, it never updates the incremental state file — mixing it into an `--incremental` workflow would leave silent gaps (both flags conflict with `--incremental` for the same reason).
+
+`--post-id 123,456` or `--id-file ids.txt` (one id per line; `#` comments allowed) fetch exactly the listed posts through the normal pipeline — media download, notes, index — with no pagination at all. An id that can't be fetched (deleted, wrong blog) prints a warning and is skipped.
+
+### Archive fidelity
+
+Each archived post file's modification time is set to the post's timestamp, so archives sort naturally by post date in a file manager.
+
+`--save-avatar` stores the blog's avatar as `avatar.{ext}` (extension detected from the image bytes) in the output directory.
+
+`--media-list` writes `media-list.jsonl`: one JSON object per archived post (`{"id": ..., "urls": [...]}`) listing every media URL the post carries — images, native video/audio, and external embeds — before any rewriting to local paths. The file describes one run: a fresh run truncates it, `--resume` appends. Useful for feeding a separate downloader.
+
+`--wayback` retries media URLs that come back 403/404 through the Internet Archive's Wayback Machine (`web.archive.org`). For old blogs whose CDN assets are long gone, a snapshot is often the only copy left.
+
+### Embeds and the trust model
+
+Everything archivr writes into an archive is HTML-escaped or sanitized — with one deliberate exception: provider embed HTML (the `embed_html` Tumblr relays from YouTube, Vimeo, Spotify, ...) is passed through raw, because escaping it would break every legitimate embed. If you'd rather not carry third-party markup in your archive, `--no-embeds` strips it before rendering — embeds become plain links to the source URL. This applies to custom templates too: with the flag set, `embed_html` is absent from the template context.
+
+### Exit codes
+
+For scripting, archivr exits with:
+
+| Code | Meaning                                                        |
+|------|----------------------------------------------------------------|
+| 0    | Backup completed and archived at least one item                |
+| 1    | Backup completed but archived nothing (e.g. no new posts)      |
+| 2    | Usage or configuration error                                   |
+| 3    | Interrupted (Ctrl-C); `--resume` continues where it left off   |
+| 4    | API or network failure                                         |
+| 5    | Other runtime error (disk, rendering, ...)                     |
+
+A lock file (`.archivr-lock`) in each output directory prevents two archivr instances from writing to the same archive at once; the lock is released automatically when the process exits, however it exits.
 
 ### Job config file
 
@@ -334,8 +383,5 @@ You can also selectively override rendering for specific block types:
 
 The following features are not yet implemented but are planned for future releases:
 
-- `--count` / `--skip` and progress display ("N / total posts")
-- Distinct exit codes for scripting
-- Multiple blog names per invocation
-- Avatar backup, post-file mtimes matching post dates, `--media-list` export
-- Internet Archive fallback for dead media URLs
+- Per-tag index pages
+- EXIF tagging of downloaded images

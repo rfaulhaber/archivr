@@ -74,6 +74,26 @@ pub struct JobState {
     #[serde(default)]
     pub index_file: bool,
     #[serde(default)]
+    pub count: Option<u64>,
+    #[serde(default)]
+    pub skip: Option<u64>,
+    #[serde(default)]
+    pub save_avatar: bool,
+    #[serde(default)]
+    pub media_list: bool,
+    #[serde(default)]
+    pub wayback: bool,
+    #[serde(default)]
+    pub no_embeds: bool,
+    /// Posts archived by this job so far, committed in step with the cursor,
+    /// so a resumed `--count` run knows how much of its budget is spent.
+    #[serde(default)]
+    pub archived_count: u64,
+    /// Posts skipped by this job so far (see `--skip`), committed in step
+    /// with the cursor.
+    #[serde(default)]
+    pub skipped_count: u64,
+    #[serde(default)]
     pub template_path: Option<Utf8PathBuf>,
 }
 
@@ -106,6 +126,14 @@ impl JobState {
             save_audio: config.save_audio,
             save_video_external: config.save_video_external,
             index_file: config.index_file,
+            count: config.count,
+            skip: config.skip,
+            save_avatar: config.save_avatar,
+            media_list: config.media_list,
+            wayback: config.wayback,
+            no_embeds: config.no_embeds,
+            archived_count: 0,
+            skipped_count: 0,
             template_path: config.template_path.clone(),
         }
     }
@@ -165,6 +193,14 @@ mod tests {
             save_audio: false,
             save_video_external: false,
             index_file: true,
+            count: Some(50),
+            skip: Some(5),
+            save_avatar: true,
+            media_list: true,
+            wayback: false,
+            no_embeds: true,
+            archived_count: 12,
+            skipped_count: 5,
             template_path: Some(Utf8PathBuf::from("my-template.html")),
         }
     }
@@ -203,6 +239,14 @@ mod tests {
         assert!(!deserialized.save_audio);
         assert!(!deserialized.save_video_external);
         assert!(deserialized.index_file);
+        assert_eq!(deserialized.count, Some(50));
+        assert_eq!(deserialized.skip, Some(5));
+        assert!(deserialized.save_avatar);
+        assert!(deserialized.media_list);
+        assert!(!deserialized.wayback);
+        assert!(deserialized.no_embeds);
+        assert_eq!(deserialized.archived_count, 12);
+        assert_eq!(deserialized.skipped_count, 5);
         assert_eq!(
             deserialized.template_path,
             Some(Utf8PathBuf::from("my-template.html"))
@@ -239,6 +283,14 @@ mod tests {
         assert!(!job.save_audio);
         assert!(!job.save_video_external);
         assert!(!job.index_file);
+        assert_eq!(job.count, None);
+        assert_eq!(job.skip, None);
+        assert!(!job.save_avatar);
+        assert!(!job.media_list);
+        assert!(!job.wayback);
+        assert!(!job.no_embeds);
+        assert_eq!(job.archived_count, 0);
+        assert_eq!(job.skipped_count, 0);
         assert_eq!(job.template_path, None);
     }
 

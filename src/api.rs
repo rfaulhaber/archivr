@@ -29,6 +29,32 @@ pub fn say(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
     }
 }
 
+/// [`say`] for stderr: error reporting that must not interleave with the
+/// progress stream (and survives `archivr ... > log`).
+pub fn say_error(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    match writeln!(std::io::stderr(), "{args}") {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// A request that failed at the HTTP/API layer after the retry policy was
+/// exhausted (timeout, unrecoverable rate limit). Typed rather than a bare
+/// `anyhow!` so the exit-code mapping can classify it — see
+/// [`is_http_failure`].
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct ApiFailure(pub String);
+
+/// Whether an error chain originates in the HTTP/API layer (as opposed to
+/// disk, rendering, or configuration failures). Drives the distinct exit
+/// code for network errors.
+pub fn is_http_failure(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<CrabError>().is_some()
+        || e.downcast_ref::<ApiFailure>().is_some()
+        || e.downcast_ref::<reqwest::Error>().is_some()
+}
+
 /// Executes an API request with the shared timeout/retry/rate-limit policy.
 ///
 /// `op` builds and sends a fresh request each attempt (builders are consumed
@@ -48,11 +74,12 @@ where
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(CrabError::RateLimit { retry_after })) => match retry_after {
                 Some(secs) if secs > MAX_RATE_LIMIT_SLEEP_SECS => {
-                    return Err(anyhow::anyhow!(
+                    return Err(ApiFailure(format!(
                         "Hit rate limit; the API asks for a {secs}s wait (over an hour, so \
                          the daily quota is likely exhausted). Use --resume to continue \
                          from where you left off later."
-                    ));
+                    ))
+                    .into());
                 }
                 Some(secs) if rate_limit_waits < MAX_RATE_LIMIT_WAITS => {
                     rate_limit_waits += 1;
@@ -66,23 +93,27 @@ where
                     continue;
                 }
                 Some(_) => {
-                    return Err(anyhow::anyhow!(
+                    return Err(ApiFailure(format!(
                         "Still rate limited after {MAX_RATE_LIMIT_WAITS} waits. \
                          Use --resume to continue from where you left off."
-                    ));
+                    ))
+                    .into());
                 }
                 None => {
-                    return Err(anyhow::anyhow!(
+                    return Err(ApiFailure(
                         "Hit rate limit, please retry later. \
                          Use --resume to continue from where you left off."
-                    ));
+                            .to_owned(),
+                    )
+                    .into());
                 }
             },
             Ok(Err(e)) if is_transient(&e) => anyhow::Error::new(e),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_elapsed) => {
-                anyhow::anyhow!("request timed out after {}s", REQUEST_TIMEOUT.as_secs())
-            }
+            Err(_elapsed) => anyhow::Error::new(ApiFailure(format!(
+                "request timed out after {}s",
+                REQUEST_TIMEOUT.as_secs()
+            ))),
         };
 
         transient_attempts += 1;
@@ -163,6 +194,15 @@ mod tests {
             .context("fetching notes")
             .context("giving up after 3 retries");
         assert!(is_client_api_error(&e));
+    }
+
+    #[test]
+    fn http_failure_classification() {
+        assert!(is_http_failure(&api_error(500)));
+        assert!(is_http_failure(
+            &anyhow::Error::new(ApiFailure("timed out".to_owned())).context("fetching page")
+        ));
+        assert!(!is_http_failure(&anyhow::anyhow!("disk full")));
     }
 
     #[test]

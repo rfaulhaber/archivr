@@ -188,18 +188,75 @@ downloaded.
 
 ## Phase 5 — Cheap wins and polish
 
-### 18. CLI ergonomics batch (count/skip/progress/exit codes/multi-blog)
+### 18. [DONE 2026-07-31] CLI ergonomics batch (count/skip/progress/exit codes/multi-blog)
 
 Cheap wins from the tumblr-utils comparison, all CLI-layer or already-available data: --count/--skip (limit/offset params exist on PostsBuilder); progress display "N / total posts" (crabrave already parses total_posts — currently never read); scripting-friendly distinct exit codes (tumblr-utils: 0 backed up / 1 nothing / 2 usage / 3 interrupted / 4 HTTP errors); multiple positional blog names per invocation with aggregated failure reporting.
 
-### 19. Archive-fidelity batch (avatar/mtime/media-list/id-file/wayback)
+Implementation notes (2026-07-31): --count/--skip are client-side over the
+cursor stream (server offset would fight the before-window model), with
+archived/skipped counters persisted in the job file so the budget spans
+--resume; both conflict with --incremental and block the state-file update
+(a sliced run's high-water mark would paper over gaps). Progress shows
+"N / total" only on unfiltered, unwindowed runs — any filter makes the
+blog-wide denominator a lie. Exit codes: 0 archived something / 1 nothing
+/ 2 usage (clap's own code; NoConsumerKey classified to match) / 3
+interrupted / 4 API-network / 5 other — classification via typed
+api::ApiFailure + CrabError/reqwest downcast walk. Ctrl-C now has a real
+handler (tokio signal feature): atomic writes + per-page cursor commits
+make immediate exit(3) safe. Multi-blog auths once, locks and backs up
+each blog independently (per-blog subdirs under an explicit --output-dir),
+reports failures per blog, re-raises the first so the exit code is honest.
+main() split into run()/backup_blog(); the shared render/media/index/
+media-list sinks travel as one OutputSinks struct.
+
+### 19. [DONE 2026-07-31] Archive-fidelity batch (avatar/mtime/media-list/id-file/wayback)
 
 Second cheap-wins batch: avatar backup via blogs(id).avatar(size) (one call, one file); set post-file mtimes to the post timestamp (archives sort naturally — tumblr-utils does this by default); --media-list newline-JSON export mapping post id → media URLs; --id-file / single-post selection via blogs(id).post(id).get(); Internet Archive fallback — on 403/404 for a media URL retry https://web.archive.org/web/0/{url} (genuinely valuable for old blogs whose CDN assets are gone).
 
-### 20. Trust and concurrency polish (--no-embeds, lock file)
+Implementation notes (2026-07-31): --save-avatar names the file by sniffing
+the bytes' magic number (the endpoint won't say what it serves; either
+AvatarResponse variant funnels to bytes) and degrades to a printed warning —
+an avatar must not abort an hours-long backup. mtime stamping is always-on
+(matching tumblr-utils), best-effort, re-applied after every nav-link
+rewrite of a file; the heal-resumed-link path is the one spot that loses it
+(previous run's timestamp is gone — accepted). --media-list records
+pre-rewrite URLs across all four collectors incl. external embeds, per-run
+semantics (truncate on fresh run, append on --resume; a mid-render abort
+can duplicate a line on resume — benign for jsonl). --post-id/--id-file is
+a pipeline without pagination: no job/state files, per-id 4xx warns and
+continues, nav slots closed immediately; the /posts/{id} endpoint is
+NPF-native so the normal Post path just works. --wayback lives inside
+download_one behind a status-carrying retry wrapper, fires only on
+permanent 403/404, and reports both errors when the snapshot also fails.
+
+### 20. [DONE 2026-07-31] Trust and concurrency polish (--no-embeds, lock file)
 
 (1) embed_html passes into archives raw by design (template.rs:627-633, 706-712) — verified as a deliberate but undocumented trust decision with no opt-out; add a --no-embeds flag (drop or link-ify embeds) and a README sentence documenting the trust model. Do NOT escape by default — that would break all legitimate YouTube/Vimeo embeds. (2) Add a lock file in the output dir so two concurrent runs don't interleave .archivr-job.json writes. (3) Low-priority: UTF-16 surrogate-pair split in render_formatted_text can yield U+FFFD (template.rs:151) — snap range boundaries to code-point boundaries.
 
-### 21. Housekeeping (CLAUDE.md, crabrave doc bug)
+Implementation notes (2026-07-31): --no-embeds strips embed_html at the
+template-value layer (content_block_to_value), not in render_block — so
+custom templates are covered too, and the default renderer's existing
+fallback chain link-ifies with zero extra logic; JSON output is untouched
+(raw API data). The lock is a real flock (std File::try_lock on an
+.archivr-lock handle), not a pid file: the kernel releases it on any exit
+path including the Ctrl-C process::exit(3), so staleness can't exist;
+acquired per blog in backup_blog. The surrogate fix snaps the format
+ranges themselves (not just segment boundaries) so the coverage test and
+the boundary list always agree on which side of a pair a format ends;
+trust-model README section added under "Embeds and the trust model".
+
+### 21. [DONE 2026-07-31] Housekeeping (CLAUDE.md, crabrave doc bug)
 
 (1) Project CLAUDE.md is stale: says there is no src/ directory (there is) and omits state.rs, images.rs, template.rs from the architecture list — update it. (2) Report/fix upstream in crabrave 1.1.1: after()'s doc-comment is a copy-paste of before()'s ("Returns posts before this timestamp", handlers/blog.rs:792); while there, consider adding a `sort` query param to PostsBuilder — its absence is why archivr can't pin ordering for after-filtered incremental queries (see P1 high-water task).
+
+Implementation notes (2026-07-31): CLAUDE.md rewritten (src/ layout, all
+13 modules, exit-code contract). The crabrave half turned out to be
+already done: the local ~/Projects/crabrave main (unreleased, still
+versioned 1.1.1) has the corrected after() doc AND a sort(SortOrder)
+param — nothing to file. Worth knowing: that same upstream now documents
+that `before` and `offset` cannot share a request, which archivr's
+same-second window paging does; the MAX_STALLED_PAGES guard already
+covers a server that ignores the offset, and once a crabrave release
+ships sort(), the incremental path could move to sort=asc+after and
+retire the concern. Remaining crabrave ask from item 14 (surface
+liked_timestamp) still stands.

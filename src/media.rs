@@ -15,12 +15,15 @@ use tokio::sync::Semaphore;
 pub const MAX_CONCURRENT_DOWNLOADS: usize = 6;
 
 /// Which media kinds a run downloads, driven by `--save-images`,
-/// `--save-video`, and `--save-audio`.
+/// `--save-video`, and `--save-audio`, plus the `--wayback` download policy.
 #[derive(Clone, Copy, Default)]
 pub struct MediaSelection {
     pub images: bool,
     pub video: bool,
     pub audio: bool,
+    /// Retry dead media URLs (403/404) through the Internet Archive's
+    /// Wayback Machine.
+    pub wayback: bool,
 }
 
 impl MediaSelection {
@@ -154,7 +157,15 @@ pub async fn download_batch_media(
         let media_dir = output_dir.join("media").join(subdir);
         let relative_prefix = format!("{}media/{subdir}/", "../".repeat(depth));
         url_map.extend(
-            download_media(client, &urls, &media_dir, &relative_prefix, semaphore).await?,
+            download_media(
+                client,
+                &urls,
+                &media_dir,
+                &relative_prefix,
+                semaphore,
+                selection.wayback,
+            )
+            .await?,
         );
     }
     Ok(url_map)
@@ -191,6 +202,7 @@ pub async fn download_media(
     media_dir: &Utf8Path,
     relative_prefix: &str,
     semaphore: &std::sync::Arc<Semaphore>,
+    wayback: bool,
 ) -> anyhow::Result<HashMap<String, String>> {
     // Deduplicate URLs
     let unique_urls: Vec<&String> = {
@@ -239,7 +251,7 @@ pub async fn download_media(
                 }
             };
 
-            match download_one(&client, &url_clone, &dest_clone).await {
+            match download_one(&client, &url_clone, &dest_clone, wayback).await {
                 Ok(()) => {
                     log::debug!("Downloaded media file: {url_clone} -> {dest_clone}");
                     Some((url_clone, rel_path))
@@ -268,53 +280,113 @@ pub async fn download_media(
     Ok(url_map)
 }
 
-async fn download_one(client: &reqwest::Client, url: &str, dest: &Utf8Path) -> anyhow::Result<()> {
+async fn download_one(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Utf8Path,
+    wayback: bool,
+) -> anyhow::Result<()> {
+    let failure = match download_with_retries(client, url, dest).await {
+        Ok(()) => return Ok(()),
+        Err(f) => f,
+    };
+    // A 403/404 from the CDN usually means the asset is simply gone (old
+    // blogs especially); the Wayback Machine often still has a copy. `web/0/`
+    // redirects to the closest snapshot.
+    if wayback && matches!(failure.status, Some(403 | 404)) {
+        let wayback_url = format!("https://web.archive.org/web/0/{url}");
+        log::info!("media URL {url} is dead ({}); trying the Wayback Machine", failure.error);
+        return download_with_retries(client, &wayback_url, dest)
+            .await
+            .map_err(|f| {
+                f.error.context(format!(
+                    "Wayback Machine fallback also failed (original error: {})",
+                    failure.error
+                ))
+            });
+    }
+    Err(failure.error)
+}
+
+/// A download that failed after the retry policy was exhausted, with the last
+/// HTTP status (if the failure was an HTTP error response at all).
+struct DownloadFailure {
+    status: Option<u16>,
+    error: anyhow::Error,
+}
+
+async fn download_with_retries(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Utf8Path,
+) -> Result<(), DownloadFailure> {
     let mut attempt: u32 = 0;
     loop {
-        let (transient, error) = match try_download(client, url, dest).await {
+        let (transient, failure) = match try_download(client, url, dest).await {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
         attempt += 1;
         if !transient || attempt > MAX_DOWNLOAD_RETRIES {
-            return Err(error);
+            return Err(failure);
         }
         let backoff = 1u64 << (attempt - 1);
         log::debug!(
-            "transient failure downloading {url} ({error}); retrying in {backoff}s \
-             (attempt {attempt}/{MAX_DOWNLOAD_RETRIES})"
+            "transient failure downloading {url} ({}); retrying in {backoff}s \
+             (attempt {attempt}/{MAX_DOWNLOAD_RETRIES})",
+            failure.error
         );
         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
     }
 }
 
-/// One download attempt. The error's `bool` distinguishes transient failures
-/// (worth retrying: transport errors, timeouts, gateway 5xx) from permanent
-/// ones (4xx, disk errors).
+/// One download attempt. The `bool` distinguishes transient failures (worth
+/// retrying: transport errors, timeouts, gateway 5xx) from permanent ones
+/// (4xx, disk errors).
 async fn try_download(
     client: &reqwest::Client,
     url: &str,
     dest: &Utf8Path,
-) -> Result<(), (bool, anyhow::Error)> {
+) -> Result<(), (bool, DownloadFailure)> {
+    let transport = |e: reqwest::Error| {
+        (
+            true,
+            DownloadFailure {
+                status: None,
+                error: anyhow::Error::new(e),
+            },
+        )
+    };
     let response = client
         .get(url)
         .timeout(DOWNLOAD_TIMEOUT)
         .send()
         .await
-        .map_err(|e| (true, anyhow::Error::new(e)))?;
+        .map_err(transport)?;
 
     let status = response.status();
     if !status.is_success() {
         let transient = matches!(status.as_u16(), 500 | 502 | 503 | 504);
-        return Err((transient, anyhow::anyhow!("HTTP {status} for {url}")));
+        return Err((
+            transient,
+            DownloadFailure {
+                status: Some(status.as_u16()),
+                error: anyhow::anyhow!("HTTP {status} for {url}"),
+            },
+        ));
     }
 
     // The request-level timeout above covers the body read as well.
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| (true, anyhow::Error::new(e)))?;
-    crate::fsutil::write_atomic(dest, &bytes).map_err(|e| (false, anyhow::Error::new(e)))?;
+    let bytes = response.bytes().await.map_err(transport)?;
+    crate::fsutil::write_atomic(dest, &bytes).map_err(|e| {
+        (
+            false,
+            DownloadFailure {
+                status: None,
+                error: anyhow::Error::new(e),
+            },
+        )
+    })?;
     Ok(())
 }
 
@@ -508,6 +580,64 @@ impl ExternalVideoDownloader {
             let last_line = stderr.lines().last().unwrap_or("no error output").trim();
             return Err(anyhow::anyhow!("yt-dlp exited with {}: {last_line}", output.status));
         }
+        Ok(())
+    }
+}
+
+/// Picks a file extension for image bytes by their magic number (the avatar
+/// endpoint doesn't say what format it serves).
+pub fn image_extension_for_bytes(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else {
+        "img"
+    }
+}
+
+/// Writes `media-list.jsonl` (`--media-list`): one JSON object per archived
+/// post mapping its id to every media URL it carries (images, native
+/// video/audio, external embeds), before any local-path rewriting. The list
+/// describes one run: a fresh run truncates it, a `--resume` appends.
+pub struct MediaListWriter {
+    file: fs_err::File,
+}
+
+pub const MEDIA_LIST_FILE: &str = "media-list.jsonl";
+
+impl MediaListWriter {
+    pub fn create(output_dir: &Utf8Path, resume: bool) -> anyhow::Result<Self> {
+        let path = output_dir.join(MEDIA_LIST_FILE);
+        let mut options = fs_err::OpenOptions::new();
+        options.create(true);
+        if resume {
+            options.append(true);
+        } else {
+            options.write(true).truncate(true);
+        }
+        Ok(Self {
+            file: options.open(path)?,
+        })
+    }
+
+    /// Records one post's media URLs; posts without media are omitted.
+    pub fn record(&mut self, post: &Post) -> anyhow::Result<()> {
+        use std::io::Write as _;
+
+        let mut urls = collect_image_urls(post);
+        urls.extend(collect_video_urls(post));
+        urls.extend(collect_audio_urls(post));
+        urls.extend(collect_external_video_urls(post));
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let line = serde_json::json!({ "id": post.id, "urls": urls });
+        writeln!(self.file, "{line}")?;
         Ok(())
     }
 }
@@ -763,6 +893,60 @@ mod tests {
             collect_external_video_urls(&post),
             vec!["https://www.youtube.com/watch?v=abc"]
         );
+    }
+
+    #[test]
+    fn image_extension_sniffing() {
+        assert_eq!(image_extension_for_bytes(b"\x89PNG\r\n\x1a\nrest"), "png");
+        assert_eq!(image_extension_for_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpg");
+        assert_eq!(image_extension_for_bytes(b"GIF89a"), "gif");
+        assert_eq!(image_extension_for_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "webp");
+        assert_eq!(image_extension_for_bytes(b"not an image"), "img");
+        assert_eq!(image_extension_for_bytes(b""), "img");
+    }
+
+    #[test]
+    fn media_list_records_posts_with_media_only() {
+        let dir = std::env::temp_dir();
+        let dir = Utf8Path::from_path(&dir).unwrap();
+        let out = dir.join(format!("archivr-test-medialist-{}", std::process::id()));
+        fs_err::create_dir_all(&out).unwrap();
+
+        let with_media = make_post(
+            vec![ContentBlock::Image {
+                media: vec![make_media("https://cdn.tumblr.com/a.jpg", Some(true))],
+                alt_text: None,
+                caption: None,
+                attribution: None,
+            }],
+            vec![],
+        );
+        let without_media = make_post(vec![], vec![]);
+
+        let mut writer = MediaListWriter::create(&out, false).unwrap();
+        writer.record(&with_media).unwrap();
+        writer.record(&without_media).unwrap();
+        drop(writer);
+
+        let content = fs_err::read_to_string(out.join(MEDIA_LIST_FILE)).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["id"], "123");
+        assert_eq!(parsed["urls"][0], "https://cdn.tumblr.com/a.jpg");
+
+        // A fresh (non-resume) writer truncates; a resume writer appends.
+        let mut writer = MediaListWriter::create(&out, true).unwrap();
+        writer.record(&with_media).unwrap();
+        drop(writer);
+        let content = fs_err::read_to_string(out.join(MEDIA_LIST_FILE)).unwrap();
+        assert_eq!(content.lines().count(), 2);
+        let writer = MediaListWriter::create(&out, false).unwrap();
+        drop(writer);
+        let content = fs_err::read_to_string(out.join(MEDIA_LIST_FILE)).unwrap();
+        assert_eq!(content.lines().count(), 0);
+
+        fs_err::remove_dir_all(&out).unwrap();
     }
 
     #[test]

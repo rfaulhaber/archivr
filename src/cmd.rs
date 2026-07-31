@@ -28,8 +28,13 @@ const POST_TYPES: [&str; 8] = [
 #[derive(Parser)]
 #[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
-    #[arg(help = "Name of the Tumblr blog to back up", value_parser = non_empty_string)]
-    pub blog_name: String,
+    #[arg(
+        help = "Names of the Tumblr blogs to back up (each goes to its own output directory)",
+        value_parser = non_empty_string,
+        num_args = 1..,
+        required = true
+    )]
+    pub blog_names: Vec<String>,
 
     #[arg(long, help = "Tumblr OAuth consumer key")]
     pub consumer_key: Option<String>,
@@ -161,6 +166,66 @@ pub struct Args {
     pub index_file: bool,
 
     #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with = "incremental",
+        help = "Back up at most N posts (newest first)"
+    )]
+    pub count: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        conflicts_with = "incremental",
+        help = "Skip the N newest posts before backing up"
+    )]
+    pub skip: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Also download the blog's avatar image into the output directory"
+    )]
+    pub save_avatar: bool,
+
+    #[arg(
+        long,
+        help = "Write media-list.jsonl in the output directory: one JSON line per archived post mapping its id to its media URLs"
+    )]
+    pub media_list: bool,
+
+    #[arg(
+        long,
+        value_name = "IDS",
+        value_delimiter = ',',
+        value_parser = non_empty_string,
+        conflicts_with_all = ["resume", "incremental", "before", "after", "count", "skip"],
+        help = "Back up only these posts (comma-separated ids) instead of paginating the blog"
+    )]
+    pub post_id: Vec<String>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["resume", "incremental", "before", "after", "count", "skip"],
+        help = "Back up only the post ids listed in this file (one per line) instead of paginating the blog"
+    )]
+    pub id_file: Option<Utf8PathBuf>,
+
+    #[arg(
+        long,
+        help = "When a media URL returns 403/404, retry it through the Internet Archive's Wayback Machine"
+    )]
+    pub wayback: bool,
+
+    #[arg(
+        long,
+        help = "Do not pass provider embed HTML (YouTube, Vimeo, ...) into archived pages; render a plain link instead"
+    )]
+    pub no_embeds: bool,
+
+    #[arg(
         short,
         long,
         help = "Path to output posts to, defaulting to ./{blog-name}"
@@ -221,7 +286,7 @@ impl std::fmt::Debug for Args {
         }
 
         f.debug_struct("Args")
-            .field("blog_name", &self.blog_name)
+            .field("blog_names", &self.blog_names)
             .field("consumer_key", &redact(&self.consumer_key))
             .field("consumer_secret", &redact(&self.consumer_secret))
             .field("config_file", &self.config_file)
@@ -245,6 +310,14 @@ impl std::fmt::Debug for Args {
             .field("save_audio", &self.save_audio)
             .field("save_video_external", &self.save_video_external)
             .field("index_file", &self.index_file)
+            .field("count", &self.count)
+            .field("skip", &self.skip)
+            .field("save_avatar", &self.save_avatar)
+            .field("media_list", &self.media_list)
+            .field("post_id", &self.post_id)
+            .field("id_file", &self.id_file)
+            .field("wayback", &self.wayback)
+            .field("no_embeds", &self.no_embeds)
             .field("output_dir", &self.output_dir)
             .field("before", &self.before)
             .field("after", &self.after)
@@ -392,6 +465,56 @@ mod tests {
         assert!(args.save_audio);
         assert!(args.save_video_external);
         assert!(args.index_file);
+    }
+
+    #[test]
+    fn multiple_blog_names_parse() {
+        let args = Args::parse_from(["archivr", "blog-a", "blog-b", "blog-c"]);
+        assert_eq!(args.blog_names, vec!["blog-a", "blog-b", "blog-c"]);
+    }
+
+    #[test]
+    fn blog_name_is_required() {
+        assert!(Args::try_parse_from(["archivr"]).is_err());
+    }
+
+    #[test]
+    fn count_and_skip_conflict_with_incremental() {
+        assert!(Args::try_parse_from(["archivr", "b", "--count", "5", "--incremental"]).is_err());
+        assert!(Args::try_parse_from(["archivr", "b", "--skip", "5", "--incremental"]).is_err());
+        let args = Args::parse_from(["archivr", "b", "--count", "5", "--skip", "10"]);
+        assert_eq!(args.count, Some(5));
+        assert_eq!(args.skip, Some(10));
+    }
+
+    #[test]
+    fn count_rejects_zero() {
+        assert!(Args::try_parse_from(["archivr", "b", "--count", "0"]).is_err());
+    }
+
+    #[test]
+    fn post_id_splits_and_conflicts_with_pagination_flags() {
+        let args = Args::parse_from(["archivr", "b", "--post-id", "123,456"]);
+        assert_eq!(args.post_id, vec!["123", "456"]);
+        assert!(Args::try_parse_from(["archivr", "b", "--post-id", "1", "--resume"]).is_err());
+        assert!(Args::try_parse_from(["archivr", "b", "--id-file", "ids.txt", "--incremental"]).is_err());
+        assert!(Args::try_parse_from(["archivr", "b", "--post-id", "1", "--count", "5"]).is_err());
+    }
+
+    #[test]
+    fn phase5_flags_parse() {
+        let args = Args::parse_from([
+            "archivr",
+            "myblog",
+            "--save-avatar",
+            "--media-list",
+            "--wayback",
+            "--no-embeds",
+        ]);
+        assert!(args.save_avatar);
+        assert!(args.media_list);
+        assert!(args.wayback);
+        assert!(args.no_embeds);
     }
 
     #[test]

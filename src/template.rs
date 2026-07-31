@@ -165,12 +165,34 @@ fn render_formatted_text(text: &str, formatting: &[InlineFormat]) -> String {
     let units: Vec<u16> = text.encode_utf16().collect();
     let len = units.len();
 
-    let mut boundaries: Vec<usize> = vec![0, len];
-    for f in formatting {
-        if f.start < f.end {
-            boundaries.push(f.start.min(len));
-            boundaries.push(f.end.min(len));
+    // A range boundary landing between the halves of a surrogate pair would
+    // split a code point and render U+FFFD; snap such boundaries back onto
+    // the pair's start. The snapped ranges drive both the segment boundaries
+    // and the coverage test below, so the two always agree on which side of
+    // the pair a format ends.
+    let snap = |i: usize| {
+        let i = i.min(len);
+        if i > 0
+            && i < len
+            && (0xDC00..0xE000).contains(&units[i])
+            && (0xD800..0xDC00).contains(&units[i - 1])
+        {
+            i - 1
+        } else {
+            i
         }
+    };
+    let ranges: Vec<(usize, usize, &InlineFormat)> = formatting
+        .iter()
+        .filter(|f| f.start < f.end)
+        .map(|f| (snap(f.start), snap(f.end), f))
+        .filter(|(start, end, _)| start < end)
+        .collect();
+
+    let mut boundaries: Vec<usize> = vec![0, len];
+    for (start, end, _) in &ranges {
+        boundaries.push(*start);
+        boundaries.push(*end);
     }
     boundaries.sort_unstable();
     boundaries.dedup();
@@ -182,10 +204,10 @@ fn render_formatted_text(text: &str, formatting: &[InlineFormat]) -> String {
             continue;
         }
 
-        let tags: Vec<(String, &'static str)> = formatting
+        let tags: Vec<(String, &'static str)> = ranges
             .iter()
-            .filter(|f| f.start <= seg_start && f.end >= seg_end && f.start < f.end)
-            .filter_map(format_tags)
+            .filter(|(start, end, _)| *start <= seg_start && *end >= seg_end)
+            .filter_map(|(_, _, f)| format_tags(f))
             .collect();
 
         for (open, _) in &tags {
@@ -286,11 +308,23 @@ pub(crate) fn html_escape(s: &str) -> String {
     out
 }
 
-/// Converts a Post to a minijinja Value for template rendering
-fn post_to_value(post: &Post) -> Value {
+/// Converts a Post to a minijinja Value for template rendering.
+///
+/// With `no_embeds`, provider embed HTML is stripped here — before any
+/// template sees the value — so both the default renderer and custom
+/// templates fall back to plain links.
+fn post_to_value(post: &Post, no_embeds: bool) -> Value {
     // Convert content blocks to a serializable format
-    let content: Vec<Value> = post.content.iter().map(content_block_to_value).collect();
-    let trail: Vec<Value> = post.trail.iter().map(trail_item_to_value).collect();
+    let content: Vec<Value> = post
+        .content
+        .iter()
+        .map(|b| content_block_to_value(b, no_embeds))
+        .collect();
+    let trail: Vec<Value> = post
+        .trail
+        .iter()
+        .map(|t| trail_item_to_value(t, no_embeds))
+        .collect();
     let tags: Vec<Value> = post.tags.iter().map(|t| Value::from(t.as_str())).collect();
 
     context! {
@@ -320,7 +354,7 @@ fn post_to_value(post: &Post) -> Value {
 }
 
 /// Converts a ContentBlock to a minijinja Value
-fn content_block_to_value(block: &ContentBlock) -> Value {
+fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
     match block {
         ContentBlock::Text {
             text,
@@ -391,7 +425,7 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 media => media_values,
                 url => url,
                 provider => provider,
-                embed_html => embed_html,
+                embed_html => if no_embeds { &None } else { embed_html },
                 duration => duration,
             }
         }
@@ -424,7 +458,7 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
                 artist => artist,
                 album => album,
                 title => title,
-                embed_html => embed_html,
+                embed_html => if no_embeds { &None } else { embed_html },
             }
         }
         ContentBlock::Link {
@@ -522,8 +556,12 @@ fn notes_to_value(notes: &PostNotes) -> Value {
 }
 
 /// Converts a TrailItem to a minijinja Value
-fn trail_item_to_value(item: &TrailItem) -> Value {
-    let content: Vec<Value> = item.content.iter().map(content_block_to_value).collect();
+fn trail_item_to_value(item: &TrailItem, no_embeds: bool) -> Value {
+    let content: Vec<Value> = item
+        .content
+        .iter()
+        .map(|b| content_block_to_value(b, no_embeds))
+        .collect();
 
     let blog = item.blog.as_ref().map(|b| {
         context! {
@@ -551,6 +589,7 @@ fn trail_item_to_value(item: &TrailItem) -> Value {
 pub struct PostRenderer<'a> {
     env: Environment<'a>,
     template_name: &'static str,
+    no_embeds: bool,
 }
 
 impl<'a> PostRenderer<'a> {
@@ -585,7 +624,15 @@ impl<'a> PostRenderer<'a> {
         Ok(Self {
             env,
             template_name: "post",
+            no_embeds: false,
         })
+    }
+
+    /// With `--no-embeds`, provider embed HTML (the one raw-HTML passthrough
+    /// in the trust model) is dropped from the template context; embeds
+    /// render as plain links instead.
+    pub fn set_no_embeds(&mut self, no_embeds: bool) {
+        self.no_embeds = no_embeds;
     }
 
     /// Creates a new renderer loading a template from a file
@@ -609,7 +656,7 @@ impl<'a> PostRenderer<'a> {
         notes: Option<&PostNotes>,
     ) -> anyhow::Result<String> {
         let template = self.env.get_template(self.template_name)?;
-        let post_value = post_to_value(post);
+        let post_value = post_to_value(post, self.no_embeds);
         let ctx = context! {
             post => post_value,
             is_reblog => post.reblogged_from_name.is_some(),
@@ -1133,6 +1180,56 @@ mod tests {
         let post = text_block("a<b>c", vec![fmt(0, 5, "italic")]);
         let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("<em>a&lt;b&gt;c</em>"));
+    }
+
+    #[test]
+    fn render_snaps_format_boundary_inside_surrogate_pair() {
+        // 😀 is two UTF-16 code units; a boundary at index 1 lands between
+        // them. It must snap to a code-point boundary instead of emitting
+        // U+FFFD halves.
+        let post = text_block("😀ab", vec![fmt(1, 4, "bold")]);
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
+        assert!(!html.contains('\u{FFFD}'));
+        assert!(html.contains("😀"));
+        assert!(html.contains("ab</strong>"));
+    }
+
+    #[test]
+    fn render_no_embeds_replaces_embed_with_link() {
+        let mut post = minimal_post();
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "video",
+            "provider": "youtube",
+            "url": "https://www.youtube.com/watch?v=abc",
+            "embed_html": "<iframe src=\"https://example.com\"></iframe>"
+        }))
+        .unwrap();
+        post.content = vec![block];
+
+        let mut renderer = PostRenderer::new().unwrap();
+        renderer.set_no_embeds(true);
+        let html = renderer.render(&post, None, None).unwrap();
+        assert!(!html.contains("<iframe"));
+        assert!(html.contains(r#"<a href="https://www.youtube.com/watch?v=abc">Video link</a>"#));
+    }
+
+    #[test]
+    fn render_no_embeds_strips_audio_embed_html_too() {
+        let mut post = minimal_post();
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "audio",
+            "provider": "spotify",
+            "url": "https://open.spotify.com/track/abc",
+            "embed_html": "<iframe src=\"https://spotify.example\"></iframe>"
+        }))
+        .unwrap();
+        post.content = vec![block];
+
+        let mut renderer = PostRenderer::new().unwrap();
+        renderer.set_no_embeds(true);
+        let html = renderer.render(&post, None, None).unwrap();
+        assert!(!html.contains("<iframe"));
+        assert!(html.contains("Audio link"));
     }
 
     #[test]

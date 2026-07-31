@@ -4,24 +4,35 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use archivr::{
-    ArchiveIndex, Args, BackupState, JobState, PostNotes, PostRenderer, PostTimestamp,
-    ResolvedConfig, api,
+    ArchiveIndex, ArchivrError, Args, BackupState, JobState, PostNotes, PostRenderer,
+    PostTimestamp, ResolvedConfig, api,
     auth::authenticate,
-    fsutil::write_atomic,
+    fsutil::{lock_output_dir, set_mtime, write_atomic},
     media::{
-        ExternalVideoDownloader, MAX_CONCURRENT_DOWNLOADS, MediaSelection, download_batch_media,
-        rewrite_post_media_urls,
+        ExternalVideoDownloader, MAX_CONCURRENT_DOWNLOADS, MediaListWriter, MediaSelection,
+        download_batch_media, image_extension_for_bytes, rewrite_post_media_urls,
     },
     notes::fetch_post_notes,
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
 use clap::Parser;
 use crabrave::Crabrave;
-use crabrave::handlers::blog::{Post, PostsResponse};
+use crabrave::handlers::blog::{AvatarResponse, Post, PostsResponse};
 use tokio::sync::Semaphore;
 
 const PROJECT_QUALIFIER: &str = "com.ryanfaulhaber";
 const PROJECT_NAME: &str = "archivr";
+
+// Exit codes for scripting (documented in the README). 0 = archived at least
+// one item; 2 is also what clap exits with on usage errors.
+const EXIT_NOTHING_ARCHIVED: u8 = 1;
+const EXIT_USAGE: u8 = 2;
+const EXIT_INTERRUPTED: i32 = 3;
+const EXIT_HTTP_ERROR: u8 = 4;
+const EXIT_RUNTIME_ERROR: u8 = 5;
+
+/// Pixel size requested for `--save-avatar` (the largest Tumblr serves).
+const AVATAR_SIZE: u16 = 512;
 
 /// Writes a progress line to stdout, treating a closed pipe (e.g. `archivr ... | head`)
 /// as success so the backup keeps running even after the reader goes away.
@@ -32,33 +43,114 @@ macro_rules! say {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> std::process::ExitCode {
     env_logger::init();
 
     let args = Args::parse();
     log::debug!("args: {:?}", args);
 
-    let mut config = ResolvedConfig::from_args(args)?;
+    // Every file is written atomically and the job cursor is committed only
+    // after its batch is on disk, so an immediate exit loses nothing; the
+    // distinct code tells scripts the run was cut short, not finished.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = api::say_error(format_args!(
+                "Interrupted. Use --resume to continue from where you left off."
+            ));
+            std::process::exit(EXIT_INTERRUPTED);
+        }
+    });
+
+    match run(args).await {
+        Ok(total_archived) => {
+            if total_archived > 0 {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::from(EXIT_NOTHING_ARCHIVED)
+            }
+        }
+        Err(e) => {
+            let _ = api::say_error(format_args!("Error: {e:#}"));
+            let code = if matches!(
+                e.downcast_ref::<ArchivrError>(),
+                Some(ArchivrError::NoConsumerKey | ArchivrError::NoConsumerSecret)
+            ) {
+                EXIT_USAGE
+            } else if api::is_http_failure(&e) {
+                EXIT_HTTP_ERROR
+            } else {
+                EXIT_RUNTIME_ERROR
+            };
+            std::process::ExitCode::from(code)
+        }
+    }
+}
+
+/// Authenticates once, then backs up each requested blog in turn. A failing
+/// blog doesn't stop the ones after it; the first failure is re-raised at the
+/// end (with a summary when several failed) so the exit code reflects it.
+async fn run(args: Args) -> anyhow::Result<u64> {
+    let configs = ResolvedConfig::from_args(args)?;
 
     let project_dir = directories::ProjectDirs::from(PROJECT_QUALIFIER, "", PROJECT_NAME)
         .ok_or_else(|| anyhow::anyhow!("Could not determine project directory"))?;
     let data_dir = camino::Utf8Path::from_path(project_dir.data_local_dir())
         .ok_or_else(|| anyhow::anyhow!("Data directory path is not valid UTF-8"))?;
 
+    let first = configs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no blog names given"))?;
     let client = authenticate(
-        &config.consumer_key,
-        &config.consumer_secret,
+        &first.consumer_key,
+        &first.consumer_secret,
         data_dir,
-        config.reauth,
-        config.cookies_file.as_deref(),
-        config.dashboard,
-        config.headless,
+        first.reauth,
+        first.cookies_file.as_deref(),
+        first.dashboard,
+        first.headless,
     )
     .await?;
 
+    let multiple = configs.len() > 1;
+    let mut total_archived: u64 = 0;
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+
+    for config in configs {
+        let blog_name = config.blog_name.clone();
+        match backup_blog(&client, config).await {
+            Ok(archived) => total_archived += archived,
+            Err(e) if multiple => {
+                api::say_error(format_args!("Backing up {blog_name} failed: {e:#}"))?;
+                failures.push((blog_name, e));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if !failures.is_empty() {
+        let names: Vec<&str> = failures.iter().map(|(name, _)| name.as_str()).collect();
+        let summary = format!(
+            "{} of the requested backups failed: {} (per-blog errors above)",
+            failures.len(),
+            names.join(", ")
+        );
+        let (_, first_error) = failures.swap_remove(0);
+        return Err(first_error.context(summary));
+    }
+
+    Ok(total_archived)
+}
+
+/// Backs up one blog into its output directory, returning how many items
+/// (posts plus special-collection entries) this invocation archived.
+async fn backup_blog(client: &Crabrave, mut config: ResolvedConfig) -> anyhow::Result<u64> {
     if !fs_err::exists(&config.output_dir)? {
         fs_err::create_dir_all(&config.output_dir)?;
     }
+
+    // Held for the rest of this blog's backup; released by the kernel however
+    // the process exits.
+    let _lock = lock_output_dir(&config.output_dir)?;
 
     let state_file = BackupState::state_file_path(&config.output_dir);
     let prior_state = BackupState::load(&state_file).ok();
@@ -196,6 +288,24 @@ async fn main() -> anyhow::Result<()> {
         if job.index_file {
             params.push("--index-file".to_owned());
         }
+        if let Some(n) = job.count {
+            params.push(format!("--count {n}"));
+        }
+        if let Some(n) = job.skip {
+            params.push(format!("--skip {n}"));
+        }
+        if job.save_avatar {
+            params.push("--save-avatar".to_owned());
+        }
+        if job.media_list {
+            params.push("--media-list".to_owned());
+        }
+        if job.wayback {
+            params.push("--wayback".to_owned());
+        }
+        if job.no_embeds {
+            params.push("--no-embeds".to_owned());
+        }
         if let Some(before) = job.before {
             params.push(format!("--before {before}"));
         }
@@ -223,10 +333,14 @@ async fn main() -> anyhow::Result<()> {
 
     let renderer = if config.json {
         None
-    } else if let Some(ref template_path) = config.template_path {
-        Some(PostRenderer::from_file(template_path)?)
     } else {
-        Some(PostRenderer::new()?)
+        let mut r = if let Some(ref template_path) = config.template_path {
+            PostRenderer::from_file(template_path)?
+        } else {
+            PostRenderer::new()?
+        };
+        r.set_no_embeds(config.no_embeds);
+        Some(r)
     };
 
     if !config.quiet {
@@ -290,68 +404,34 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let newest_observed = run_backup(
-        &client,
-        &config,
-        renderer.as_ref(),
-        external_video.as_ref(),
-        archive_index.as_mut(),
-        &mut job,
-        &job_file,
-    )
-    .await?;
+    let mut media_list = if config.media_list {
+        Some(MediaListWriter::create(
+            &config.output_dir,
+            resuming_existing_job,
+        )?)
+    } else {
+        None
+    };
 
-    if let Some(newest_ts) = newest_observed {
-        let now = chrono::Utc::now().timestamp();
-        let filters = config.filter_descriptor();
-        // Only floor against prior state from the same blog and the same
-        // filter set: a non-incremental run into another blog's directory (or
-        // a filtered one-off into a full archive) must not inherit that mark.
-        let prior_same_mode = prior_state
-            .as_ref()
-            .filter(|s| s.blog_name == config.blog_name && s.filters == filters);
-        let prior_high_water = prior_same_mode
-            .map(|s| s.newest_post_timestamp)
-            .unwrap_or(0);
-        // A one-off run with a different filter set must not clobber the
-        // existing state either: its mark describes a different post set, and
-        // overwriting would break the directory's established incremental
-        // workflow.
-        let clobbers_other_mode = prior_state
-            .as_ref()
-            .is_some_and(|s| s.blog_name == config.blog_name && s.filters != filters);
-        // The mark asserts "everything up to this timestamp is archived", so
-        // it may only advance when this run's coverage is contiguous with the
-        // archive below it. A run floored by --after above the prior mark (or
-        // into a fresh directory) leaves a gap the mark must not paper over.
-        // Incremental runs pass trivially: their floor IS the prior mark.
-        if clobbers_other_mode {
-            // Not gated on --quiet: the user may be counting on this run to
-            // (re)establish the incremental baseline, and it deliberately
-            // does not.
-            say!(
-                "Note: incremental state was not updated because this run's filters \
-                 differ from the ones the existing state was recorded with. Delete \
-                 {state_file} first if this run's filters should become the \
-                 directory's incremental baseline."
-            )?;
-        } else if config.after.is_none_or(|floor| floor <= prior_high_water) {
-            let new_state = BackupState {
-                blog_name: config.blog_name.clone(),
-                last_run_at: now,
-                // Tumblr allows arbitrary post dates; cap the mark at the
-                // present so a single future-dated post can't push the
-                // incremental boundary past posts not yet written.
-                newest_post_timestamp: newest_ts.max(prior_high_water).min(now),
-                filters,
-            };
-            new_state.save(&state_file)?;
-        } else {
-            log::info!(
-                "not updating incremental state: this run's --after floor is above \
-                 the last archived post, so posts below it remain unarchived"
-            );
-        }
+    if config.save_avatar {
+        backup_avatar(client, &config).await;
+    }
+
+    let mut sinks = OutputSinks {
+        renderer: renderer.as_ref(),
+        external_video: external_video.as_ref(),
+        archive_index: archive_index.as_mut(),
+        media_list: media_list.as_mut(),
+    };
+
+    let mut total_archived: u64;
+
+    if !config.post_ids.is_empty() {
+        total_archived = run_single_posts(client, &config, &mut sinks).await?;
+    } else {
+        let outcome = run_backup(client, &config, &mut sinks, &mut job, &job_file).await?;
+        total_archived = outcome.archived;
+        save_backup_state(&config, &state_file, prior_state.as_ref(), outcome.newest_observed)?;
     }
 
     // Special collections run after the main backup but before the job file
@@ -359,14 +439,7 @@ async fn main() -> anyhow::Result<()> {
     // window quickly and re-runs the specials wholesale.
     for kind in SpecialKind::ALL {
         if kind.enabled(&config) {
-            backup_special(
-                &client,
-                &config,
-                renderer.as_ref(),
-                external_video.as_ref(),
-                kind,
-            )
-            .await?;
+            total_archived += backup_special(client, &config, &mut sinks, kind).await?;
         }
     }
 
@@ -386,12 +459,85 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    if fs_err::exists(&job_file)? {
+    // Single-post mode never ran the main window, so a job file found here
+    // belongs to an earlier interrupted run and must stay resumable.
+    if config.post_ids.is_empty() && fs_err::exists(&job_file)? {
         JobState::delete(&job_file)?;
     }
 
     if !config.quiet {
         say!("Backup complete.")?;
+    }
+
+    Ok(total_archived)
+}
+
+/// Records the incremental high-water mark after a completed main-window run.
+/// `--count`/`--skip` runs are deliberately excluded: their coverage has gaps
+/// the mark would paper over, silently breaking later `--incremental` runs.
+fn save_backup_state(
+    config: &ResolvedConfig,
+    state_file: &camino::Utf8Path,
+    prior_state: Option<&BackupState>,
+    newest_observed: Option<PostTimestamp>,
+) -> anyhow::Result<()> {
+    let Some(newest_ts) = newest_observed else {
+        return Ok(());
+    };
+    if config.count.is_some() || config.skip.is_some() {
+        log::info!(
+            "not updating incremental state: --count/--skip runs archive only a \
+             slice of the window, so the high-water mark cannot advance"
+        );
+        return Ok(());
+    }
+    let now = chrono::Utc::now().timestamp();
+    let filters = config.filter_descriptor();
+    // Only floor against prior state from the same blog and the same
+    // filter set: a non-incremental run into another blog's directory (or
+    // a filtered one-off into a full archive) must not inherit that mark.
+    let prior_same_mode =
+        prior_state.filter(|s| s.blog_name == config.blog_name && s.filters == filters);
+    let prior_high_water = prior_same_mode
+        .map(|s| s.newest_post_timestamp)
+        .unwrap_or(0);
+    // A one-off run with a different filter set must not clobber the
+    // existing state either: its mark describes a different post set, and
+    // overwriting would break the directory's established incremental
+    // workflow.
+    let clobbers_other_mode =
+        prior_state.is_some_and(|s| s.blog_name == config.blog_name && s.filters != filters);
+    // The mark asserts "everything up to this timestamp is archived", so
+    // it may only advance when this run's coverage is contiguous with the
+    // archive below it. A run floored by --after above the prior mark (or
+    // into a fresh directory) leaves a gap the mark must not paper over.
+    // Incremental runs pass trivially: their floor IS the prior mark.
+    if clobbers_other_mode {
+        // Not gated on --quiet: the user may be counting on this run to
+        // (re)establish the incremental baseline, and it deliberately
+        // does not.
+        say!(
+            "Note: incremental state was not updated because this run's filters \
+             differ from the ones the existing state was recorded with. Delete \
+             {state_file} first if this run's filters should become the \
+             directory's incremental baseline."
+        )?;
+    } else if config.after.is_none_or(|floor| floor <= prior_high_water) {
+        let new_state = BackupState {
+            blog_name: config.blog_name.clone(),
+            last_run_at: now,
+            // Tumblr allows arbitrary post dates; cap the mark at the
+            // present so a single future-dated post can't push the
+            // incremental boundary past posts not yet written.
+            newest_post_timestamp: newest_ts.max(prior_high_water).min(now),
+            filters,
+        };
+        new_state.save(state_file)?;
+    } else {
+        log::info!(
+            "not updating incremental state: this run's --after floor is above \
+             the last archived post, so posts below it remain unarchived"
+        );
     }
 
     Ok(())
@@ -405,6 +551,8 @@ struct BufferedHtmlPost {
     output_file: camino::Utf8PathBuf,
     /// Relative href for *this* post (used as `newer_href` by the next post).
     relative_href: String,
+    /// The post's timestamp, re-stamped as the file's mtime after the rewrite.
+    timestamp: PostTimestamp,
 }
 
 /// Compute the relative href for a post given its ID and the output mode.
@@ -420,7 +568,16 @@ fn post_relative_href(post_id: &str, directories: bool) -> String {
 fn finalize_buffered_post(buf: &BufferedHtmlPost, older_html: &str) -> anyhow::Result<()> {
     let final_content = buf.content.replace(OLDER_NAV_PLACEHOLDER, older_html);
     write_atomic(&buf.output_file, final_content.as_bytes())?;
+    stamp_mtime(&buf.output_file, buf.timestamp);
     Ok(())
+}
+
+/// Best-effort mtime stamping: archives sort naturally by post date, but a
+/// filesystem that refuses the stamp must not fail the backup.
+fn stamp_mtime(path: &camino::Utf8Path, timestamp: PostTimestamp) {
+    if let Err(e) = set_mtime(path, timestamp) {
+        log::warn!("could not set the modification time of {path}: {e}");
+    }
 }
 
 /// Archives written by pre-cursor versions kept each post's images in
@@ -479,16 +636,48 @@ fn migrate_directories_media_layout(output_dir: &camino::Utf8Path) -> anyhow::Re
     Ok(migrated)
 }
 
+/// What a completed main-window run produced: the newest post timestamp seen
+/// (for the incremental mark) and how many posts this invocation archived.
+struct BackupOutcome {
+    newest_observed: Option<PostTimestamp>,
+    archived: u64,
+}
+
+/// The output destinations shared by the main-window, single-post, and
+/// special-collection pipelines.
+struct OutputSinks<'a> {
+    renderer: Option<&'a PostRenderer<'a>>,
+    external_video: Option<&'a ExternalVideoDownloader>,
+    archive_index: Option<&'a mut ArchiveIndex>,
+    media_list: Option<&'a mut MediaListWriter>,
+}
+
 async fn run_backup(
     client: &Crabrave,
     config: &ResolvedConfig,
-    renderer: Option<&PostRenderer<'_>>,
-    external_video: Option<&ExternalVideoDownloader>,
-    mut archive_index: Option<&mut ArchiveIndex>,
+    sinks: &mut OutputSinks<'_>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
-) -> anyhow::Result<Option<PostTimestamp>> {
-    let mut posts_archived: u64 = 0;
+) -> anyhow::Result<BackupOutcome> {
+    // Cumulative across --resume boundaries (restored from the job file), so
+    // the --count budget and --skip window span the whole job, not just this
+    // process.
+    let initial_archived = job.archived_count;
+    let mut posts_archived: u64 = job.archived_count;
+    let mut posts_skipped: u64 = job.skipped_count;
+    let skip_target = config.skip.unwrap_or(0);
+    let mut reached_count = false;
+    // The blog-wide post total only matches what this run will fetch when
+    // nothing narrows the window; a filtered denominator would just mislead.
+    let show_total = config.include_tags.is_empty()
+        && config.post_type.is_none()
+        && !config.no_reblogs
+        && !config.only_reblogs
+        && config.before.is_none()
+        && config.after.is_none()
+        && config.count.is_none()
+        && config.skip.is_none();
+    let mut reported_total: Option<u64> = None;
     let mut buffered: Option<BufferedHtmlPost> = None;
     let mut newest_observed: Option<PostTimestamp> = None;
     // Ids processed this run. Window jumps deliberately re-include the boundary
@@ -514,6 +703,7 @@ async fn run_backup(
         images: config.save_images,
         video: config.save_video,
         audio: config.save_audio,
+        wayback: config.wayback,
     };
     let media_depth = usize::from(config.directories);
     let index_metadata_path = ArchiveIndex::metadata_path(&config.output_dir);
@@ -537,6 +727,10 @@ async fn run_backup(
             let response = fetch
                 .await
                 .map_err(|e| anyhow::anyhow!("page fetch task failed: {e}"))??;
+
+            if response.total_posts > 0 {
+                reported_total = reported_total.max(Some(response.total_posts));
+            }
 
             if response.posts.is_empty() {
                 log::info!("no more posts to fetch, ending backup");
@@ -630,11 +824,19 @@ async fn run_backup(
                 HashMap::new()
             };
 
-            if let Some(external) = external_video {
+            if let Some(external) = sinks.external_video {
                 external.download_batch(&selected).await?;
             }
 
             for &post in &selected {
+                // `--skip` consumes the newest posts before archiving starts;
+                // the skipped count persists in the job file so a resumed run
+                // doesn't skip a fresh batch again.
+                if posts_skipped < skip_target {
+                    posts_skipped += 1;
+                    continue;
+                }
+
                 ensure_numeric_id(&post.id)?;
 
                 log::info!("processing post {}", post.id);
@@ -644,6 +846,10 @@ async fn run_backup(
                 } else {
                     None
                 };
+
+                if let Some(w) = sinks.media_list.as_deref_mut() {
+                    w.record(post)?;
+                }
 
                 let post: Cow<'_, Post> = if url_map.is_empty() {
                     Cow::Borrowed(post)
@@ -664,10 +870,11 @@ async fn run_backup(
                         config.output_dir.join(format!("{}.json", post.id))
                     };
                     write_atomic(&output_file, content.as_bytes())?;
+                    stamp_mtime(&output_file, post.timestamp);
                     log::debug!("saved post {} to {}", post.id, output_file);
                 } else {
                     // HTML mode: buffer for nav link injection
-                    let r = renderer
+                    let r = sinks.renderer
                         .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
 
                     let newer_href = buffered
@@ -695,6 +902,7 @@ async fn run_backup(
                     // its "older" link so no on-disk link ever targets a missing
                     // file.
                     write_atomic(&output_file, content.as_bytes())?;
+                    stamp_mtime(&output_file, post.timestamp);
 
                     // Finalize the previous buffered post now that we know its "older" neighbor
                     if let Some(prev) = buffered.take() {
@@ -711,20 +919,39 @@ async fn run_backup(
                         content,
                         output_file,
                         relative_href: current_href,
+                        timestamp: post.timestamp,
                     });
                 }
 
-                if let Some(idx) = archive_index.as_deref_mut() {
+                if let Some(idx) = sinks.archive_index.as_deref_mut() {
                     idx.record(&post);
                 }
 
                 posts_archived += 1;
+                if config.count.is_some_and(|c| posts_archived >= c) {
+                    reached_count = true;
+                    break;
+                }
             }
 
             // Mark every post in the raw batch (not just the processed ones)
             // so boundary-second re-fetches after a window jump are skipped.
             for post in &response.posts {
                 seen_ids.insert(post.id.clone());
+            }
+
+            if reached_count {
+                // The run is complete (the budget is spent), so the cursor
+                // needn't advance — the job file is deleted on return. The
+                // prefetch's result is unwanted; don't let it run on.
+                if let Some(fetch) = pending_fetch.take() {
+                    fetch.abort();
+                }
+                if !config.quiet {
+                    say!("  {} posts archived (--count limit reached)", posts_archived)?;
+                }
+                log::info!("reached the --count limit, ending backup");
+                break;
             }
 
             // Commit the cursor only after the batch's files are on disk; an
@@ -735,6 +962,8 @@ async fn run_backup(
             job.before_cursor = Some(cursor);
             job.window_offset = window_offset;
             job.last_page_ids = response.posts.iter().map(|p| p.id.clone()).collect();
+            job.archived_count = posts_archived;
+            job.skipped_count = posts_skipped;
             if let Some(b) = buffered.as_ref() {
                 job.last_post_href = Some(b.relative_href.clone());
                 job.last_post_file = Some(b.output_file.clone());
@@ -743,12 +972,17 @@ async fn run_backup(
             // Persisted in step with the job file so an interrupt loses no
             // index entries for posts already on disk: a later --resume skips
             // those posts and could never re-record them.
-            if let Some(idx) = archive_index.as_deref_mut() {
+            if let Some(idx) = sinks.archive_index.as_deref_mut() {
                 idx.save(&index_metadata_path)?;
             }
 
             if !config.quiet {
-                say!("  {} posts archived", posts_archived)?;
+                match reported_total {
+                    Some(total) if show_total => {
+                        say!("  {} / {} posts archived", posts_archived, total)?;
+                    }
+                    _ => say!("  {} posts archived", posts_archived)?,
+                }
             }
 
             if reached_floor {
@@ -773,7 +1007,169 @@ async fn run_backup(
 
     loop_result?;
 
-    Ok(newest_observed)
+    Ok(BackupOutcome {
+        newest_observed,
+        archived: posts_archived - initial_archived,
+    })
+}
+
+/// Backs up an explicit list of post ids (`--post-id` / `--id-file`) through
+/// the standard pipeline, without pagination, job, or incremental state. A
+/// 4xx on one requested id (deleted post, wrong blog) warns and moves on; the
+/// prev/next chain doesn't apply to an arbitrary selection, so each file's
+/// older slot is closed immediately.
+async fn run_single_posts(
+    client: &Crabrave,
+    config: &ResolvedConfig,
+    sinks: &mut OutputSinks<'_>,
+) -> anyhow::Result<u64> {
+    let download_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let media_selection = MediaSelection {
+        images: config.save_images,
+        video: config.save_video,
+        audio: config.save_audio,
+        wayback: config.wayback,
+    };
+    let media_depth = usize::from(config.directories);
+    let mut archived: u64 = 0;
+
+    for id in &config.post_ids {
+        if ensure_numeric_id(id).is_err() {
+            // Not gated on --quiet: an explicitly requested id silently not
+            // appearing in the archive would misrepresent it.
+            say!("  Warning: skipping {id:?}: not a numeric Tumblr post id")?;
+            continue;
+        }
+
+        let fetched = api::send_with_retries(
+            || client.blogs(config.blog_name.clone()).post(id.clone()).get(),
+            config.quiet,
+        )
+        .await;
+        let post = match fetched {
+            Ok(p) => p,
+            Err(e) if api::is_client_api_error(&e) => {
+                say!("  Warning: could not fetch post {id} ({e:#}); skipping it.")?;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        ensure_numeric_id(&post.id)?;
+
+        let post_notes = if config.save_notes {
+            fetch_notes_for_post(client, config, &post).await?
+        } else {
+            None
+        };
+
+        let url_map: HashMap<String, String> = if media_selection.any() {
+            download_batch_media(
+                client.client(),
+                &[&post],
+                &config.output_dir,
+                media_depth,
+                media_selection,
+                &download_semaphore,
+            )
+            .await?
+        } else {
+            HashMap::new()
+        };
+        if let Some(external) = sinks.external_video {
+            external.download_batch(&[&post]).await?;
+        }
+        if let Some(w) = sinks.media_list.as_deref_mut() {
+            w.record(&post)?;
+        }
+
+        let post: Cow<'_, Post> = if url_map.is_empty() {
+            Cow::Borrowed(&post)
+        } else {
+            rewrite_post_media_urls(&post, &url_map)
+        };
+
+        let output_file = if config.directories {
+            let post_dir = config.output_dir.join(&post.id);
+            if !fs_err::exists(&post_dir)? {
+                fs_err::create_dir(&post_dir)?;
+            }
+            post_dir.join(if config.json { "index.json" } else { "index.html" })
+        } else {
+            let ext = if config.json { "json" } else { "html" };
+            config.output_dir.join(format!("{}.{ext}", post.id))
+        };
+
+        let content = if config.json {
+            render_json(&post, post_notes.as_ref())?
+        } else {
+            let r = sinks.renderer.ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
+            r.render(&post, None, post_notes.as_ref())?
+                .replace(OLDER_NAV_PLACEHOLDER, "<span></span>")
+        };
+        write_atomic(&output_file, content.as_bytes())?;
+        stamp_mtime(&output_file, post.timestamp);
+
+        if let Some(idx) = sinks.archive_index.as_deref_mut() {
+            idx.record(&post);
+        }
+        archived += 1;
+        if !config.quiet {
+            say!("  archived post {}", post.id)?;
+        }
+    }
+
+    Ok(archived)
+}
+
+/// Downloads the blog's avatar into the output directory (`--save-avatar`).
+/// Best-effort: an avatar failure warns rather than aborting a possibly
+/// hours-long backup.
+async fn backup_avatar(client: &Crabrave, config: &ResolvedConfig) {
+    match fetch_avatar(client, config).await {
+        Ok(dest) => {
+            if !config.quiet {
+                let _ = say!("Saved avatar to {dest}");
+            }
+        }
+        // Not gated on --quiet: an archive silently missing the avatar
+        // contradicts an explicit --save-avatar.
+        Err(e) => {
+            let _ = say!("Warning: could not save the blog avatar ({e:#})");
+        }
+    }
+}
+
+async fn fetch_avatar(
+    client: &Crabrave,
+    config: &ResolvedConfig,
+) -> anyhow::Result<camino::Utf8PathBuf> {
+    let response = api::send_with_retries(
+        || {
+            let blogs = client.blogs(config.blog_name.clone());
+            async move { blogs.avatar(Some(AVATAR_SIZE)).await }
+        },
+        config.quiet,
+    )
+    .await?;
+    let bytes = match response {
+        AvatarResponse::ImageData(data) => data,
+        AvatarResponse::ImageUrl { avatar_url } => {
+            let response = client
+                .client()
+                .get(&avatar_url)
+                .timeout(api::REQUEST_TIMEOUT)
+                .send()
+                .await?
+                .error_for_status()?;
+            response.bytes().await?.to_vec()
+        }
+    };
+    // The endpoint doesn't say what format it serves, so name the file by
+    // what the bytes actually are.
+    let ext = image_extension_for_bytes(&bytes);
+    let dest = config.output_dir.join(format!("avatar.{ext}"));
+    write_atomic(&dest, &bytes)?;
+    Ok(dest)
 }
 
 /// The id becomes a filesystem path component and a nav href, so refuse
@@ -969,10 +1365,9 @@ async fn fetch_special_page(
 async fn backup_special(
     client: &Crabrave,
     config: &ResolvedConfig,
-    renderer: Option<&PostRenderer<'_>>,
-    external_video: Option<&ExternalVideoDownloader>,
+    sinks: &mut OutputSinks<'_>,
     kind: SpecialKind,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<u64> {
     if !config.quiet {
         say!("Backing up {}...", kind.plural())?;
     }
@@ -987,6 +1382,7 @@ async fn backup_special(
         images: config.save_images,
         video: config.save_video,
         audio: config.save_audio,
+        wayback: config.wayback,
     };
     // Files live one level below the output dir (two with --directories), so
     // the shared media stores need a deeper relative prefix than the main
@@ -1036,12 +1432,16 @@ async fn backup_special(
             HashMap::new()
         };
 
-        if let Some(external) = external_video {
+        if let Some(external) = sinks.external_video {
             external.download_batch(&new_posts).await?;
         }
 
         for &post in &new_posts {
             ensure_numeric_id(&post.id)?;
+
+            if let Some(w) = sinks.media_list.as_deref_mut() {
+                w.record(post)?;
+            }
 
             let post: Cow<'_, Post> = if url_map.is_empty() {
                 Cow::Borrowed(post)
@@ -1063,7 +1463,7 @@ async fn backup_special(
             let content = if config.json {
                 render_json(&post, None)?
             } else {
-                let r = renderer
+                let r = sinks.renderer
                     .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
                 // No nav chain among drafts/queue/submissions: close the
                 // older slot immediately.
@@ -1071,6 +1471,7 @@ async fn backup_special(
                     .replace(OLDER_NAV_PLACEHOLDER, "<span></span>")
             };
             write_atomic(&output_file, content.as_bytes())?;
+            stamp_mtime(&output_file, post.timestamp);
             archived += 1;
         }
 
@@ -1106,7 +1507,7 @@ async fn backup_special(
         )?;
     }
 
-    Ok(())
+    Ok(archived)
 }
 
 /// Replaces the older-nav placeholder in a previous run's last written post,

@@ -28,18 +28,27 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 
 ## Code Architecture
 
-There is no `src/` directory in this project. All the Rust source files start at the top level.
+All Rust sources live under `src/`:
 
-- `main.rs` - CLI entry point, authentication flow, backup orchestration
-- `lib.rs` - Core library: error types, OAuth callback server, re-exports
-- `cmd.rs` - CLI argument definitions using clap derive
-- `config.rs` - Configuration file deserialization and CLI args resolution into `ResolvedConfig`
-- `auth.rs` - Authentication: token storage, expiry checking, refresh-on-expiry, CSRF verification, interactive OAuth flow
-- `job.rs` - `JobState` (in-progress backup pagination and persisted job parameters for `--resume`)
+- `src/main.rs` - CLI entry point: exit-code mapping, Ctrl-C handling, per-blog orchestration (`backup_blog`), the cursor-pagination loop (`run_backup`), single-post mode, special collections (drafts/queue/submissions/likes), avatar backup
+- `src/lib.rs` - Core library: error types, OAuth callback server, re-exports
+- `src/cmd.rs` - CLI argument definitions using clap derive (manual `Debug` impl redacts OAuth credentials)
+- `src/config.rs` - Configuration file deserialization and CLI args resolution into one `ResolvedConfig` per requested blog
+- `src/auth.rs` - Authentication: token storage, expiry checking, refresh-on-expiry, CSRF verification, interactive OAuth flow
+- `src/api.rs` - Shared request policy: per-request timeout, transient-error retries, rate-limit sleeps (`send_with_retries`), error classification for exit codes, stdout/stderr writers (`say`/`say_error` — the sanctioned alternative to the denied `println!`/`eprintln!`)
+- `src/job.rs` - `JobState` (in-progress backup pagination cursor and persisted job parameters for `--resume`)
+- `src/state.rs` - `BackupState` (`.archivr-state.json`: incremental high-water mark plus the filter descriptor it was recorded under)
+- `src/media.rs` - Media collection/download/URL-rewriting into the shared `media/{images,videos,audio}/` stores, Wayback Machine fallback, the yt-dlp bridge for external embeds, `media-list.jsonl` writer
+- `src/template.rs` - minijinja rendering: default template, NPF block rendering, HTML escaping/URL sanitizing, `--no-embeds` stripping
+- `src/index.rs` - `ArchiveIndex` (`.archivr-index.json` metadata and `index.html` generation)
+- `src/notes.rs` - Notes fetching with `_links` cursor pagination
+- `src/fsutil.rs` - Atomic writes (temp + rename), mtime stamping, the output-directory lock
 
 The OAuth flow uses a local TCP server on port 6263 to capture the callback. Authentication tokens are persisted to `{data_local_dir}/archivr/auth.json` using the `directories` crate.
 
 The `crabrave` library handles Tumblr API interactions.
+
+Exit codes are part of the CLI contract (documented in the README): 0 archived something, 1 completed but archived nothing, 2 usage error, 3 interrupted, 4 API/network error, 5 other runtime error.
 
 ### Resumable backups
 
