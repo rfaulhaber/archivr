@@ -1,21 +1,21 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
 
+use anyhow::Context as _;
 use archivr::{
-    Args, BackupState, JobState, PostRenderer, PostTimestamp, ResolvedConfig,
+    Args, BackupState, JobState, PostNotes, PostRenderer, PostTimestamp, ResolvedConfig, api,
     auth::authenticate,
     fsutil::write_atomic,
     images::{
         MAX_CONCURRENT_DOWNLOADS, collect_image_urls, download_images, rewrite_post_image_urls,
     },
+    notes::fetch_post_notes,
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
 use clap::Parser;
+use crabrave::Crabrave;
 use crabrave::handlers::blog::{Post, PostsResponse};
-use crabrave::{CrabError, Crabrave};
 use tokio::sync::Semaphore;
 
 const PROJECT_QUALIFIER: &str = "com.ryanfaulhaber";
@@ -24,12 +24,9 @@ const PROJECT_NAME: &str = "archivr";
 /// Writes a progress line to stdout, treating a closed pipe (e.g. `archivr ... | head`)
 /// as success so the backup keeps running even after the reader goes away.
 macro_rules! say {
-    ($($arg:tt)*) => {{
-        match writeln!(std::io::stdout(), $($arg)*) {
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            other => other,
-        }
-    }};
+    ($($arg:tt)*) => {
+        api::say(format_args!($($arg)*))
+    };
 }
 
 #[tokio::main]
@@ -141,6 +138,21 @@ async fn main() -> anyhow::Result<()> {
         if job.save_images {
             params.push("--save-images".to_owned());
         }
+        if job.save_notes {
+            params.push("--save-notes".to_owned());
+        }
+        if let Some(n) = job.notes_limit {
+            params.push(format!("--notes-limit {n}"));
+        }
+        if job.drafts {
+            params.push("--drafts".to_owned());
+        }
+        if job.queue {
+            params.push("--queue".to_owned());
+        }
+        if job.submissions {
+            params.push("--submissions".to_owned());
+        }
         if let Some(before) = job.before {
             params.push(format!("--before {before}"));
         }
@@ -226,6 +238,15 @@ async fn main() -> anyhow::Result<()> {
                 "not updating incremental state: this run's --after floor is above \
                  the last archived post, so posts below it remain unarchived"
             );
+        }
+    }
+
+    // Special collections run after the main backup but before the job file
+    // is deleted: if one fails, --resume finishes the (already-complete) main
+    // window quickly and re-runs the specials wholesale.
+    for kind in SpecialKind::ALL {
+        if kind.enabled(&config) {
+            backup_special(&client, &config, renderer.as_ref(), kind).await?;
         }
     }
 
@@ -462,18 +483,15 @@ async fn run_backup(
             };
 
             for &post in &new_posts {
-                // The id becomes a filesystem path component and a nav href, so
-                // refuse anything but the numeric ids Tumblr actually issues
-                // (defense-in-depth against a hostile or proxied API).
-                if post.id.is_empty() || !post.id.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(anyhow::anyhow!(
-                        "API returned post id {:?}, which is not numeric; \
-                     refusing to use it as a file name",
-                        post.id
-                    ));
-                }
+                ensure_numeric_id(&post.id)?;
 
                 log::info!("processing post {}", post.id);
+
+                let post_notes = if config.save_notes {
+                    fetch_notes_for_post(client, config, post).await?
+                } else {
+                    None
+                };
 
                 let post: Cow<'_, Post> = if url_map.is_empty() {
                     Cow::Borrowed(post)
@@ -483,7 +501,7 @@ async fn run_backup(
 
                 if config.json {
                     // JSON mode: write immediately, no navigation
-                    let content = serde_json::to_string_pretty(&*post)?;
+                    let content = render_json(&post, post_notes.as_ref())?;
                     let output_file = if config.directories {
                         let post_dir = config.output_dir.join(&post.id);
                         if !fs_err::exists(&post_dir)? {
@@ -504,7 +522,7 @@ async fn run_backup(
                         .as_ref()
                         .map(|b| b.relative_href.as_str())
                         .or(resume_newer_href.as_deref());
-                    let content = r.render(&post, newer_href)?;
+                    let content = r.render(&post, newer_href, post_notes.as_ref())?;
 
                     let output_file = if config.directories {
                         let post_dir = config.output_dir.join(&post.id);
@@ -596,6 +614,298 @@ async fn run_backup(
     Ok(newest_observed)
 }
 
+/// The id becomes a filesystem path component and a nav href, so refuse
+/// anything but the numeric ids Tumblr actually issues (defense-in-depth
+/// against a hostile or proxied API).
+fn ensure_numeric_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(anyhow::anyhow!(
+            "API returned post id {id:?}, which is not numeric; \
+             refusing to use it as a file name"
+        ));
+    }
+    Ok(())
+}
+
+/// Serializes a post for --json output, embedding its captured notes under a
+/// `notes` key when --save-notes is active.
+fn render_json(post: &Post, notes: Option<&PostNotes>) -> anyhow::Result<String> {
+    let content = match notes {
+        Some(n) => {
+            let mut value = serde_json::to_value(post)?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("notes".to_owned(), serde_json::to_value(n)?);
+            }
+            serde_json::to_string_pretty(&value)?
+        }
+        None => serde_json::to_string_pretty(post)?,
+    };
+    Ok(content)
+}
+
+/// Fetches a post's notes under --save-notes. A client-side rejection (4xx)
+/// of one post's notes degrades gracefully — the post is still archived,
+/// without notes, and the failure is printed — while rate-limit or retry
+/// exhaustion still aborts the run so --resume can pick it up.
+async fn fetch_notes_for_post(
+    client: &Crabrave,
+    config: &ResolvedConfig,
+    post: &Post,
+) -> anyhow::Result<Option<PostNotes>> {
+    if post.note_count == 0 {
+        return Ok(Some(PostNotes::default()));
+    }
+    match fetch_post_notes(
+        client,
+        &config.blog_name,
+        &post.id,
+        config.notes_limit,
+        config.quiet,
+    )
+    .await
+    {
+        Ok(n) => Ok(Some(n)),
+        // A 4xx refusal of this one post, or an unparseable body that
+        // outlived the retry budget (a WAF's HTML error page), should cost
+        // this post its notes — not the whole run.
+        Err(e) if api::is_client_api_error(&e) || api::is_parse_error(&e) => {
+            // Not gated on --quiet: an archive silently missing notes
+            // contradicts an explicit --save-notes.
+            say!(
+                "  Warning: could not fetch notes for post {} ({e:#}); \
+                 archiving it without notes.",
+                post.id
+            )?;
+            Ok(Some(PostNotes::default()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The authenticated-user-only post collections backed up alongside the blog.
+#[derive(Clone, Copy)]
+enum SpecialKind {
+    Drafts,
+    Queue,
+    Submissions,
+}
+
+impl SpecialKind {
+    const ALL: [Self; 3] = [Self::Drafts, Self::Queue, Self::Submissions];
+
+    fn enabled(self, config: &ResolvedConfig) -> bool {
+        match self {
+            Self::Drafts => config.drafts,
+            Self::Queue => config.queue,
+            Self::Submissions => config.submissions,
+        }
+    }
+
+    /// Subdirectory of the output dir the collection is written to.
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Drafts => "drafts",
+            Self::Queue => "queue",
+            Self::Submissions => "submissions",
+        }
+    }
+
+    fn plural(self) -> &'static str {
+        match self {
+            Self::Drafts => "drafts",
+            Self::Queue => "queued posts",
+            Self::Submissions => "submissions",
+        }
+    }
+}
+
+/// Fetches one page of a special collection. Drafts paginate by `before_id`;
+/// queue and submissions by offset.
+async fn fetch_special_page(
+    client: &Crabrave,
+    blog_name: &str,
+    kind: SpecialKind,
+    before_id: Option<&str>,
+    offset: u64,
+    quiet: bool,
+) -> anyhow::Result<Vec<Post>> {
+    match kind {
+        SpecialKind::Drafts => api::send_with_retries(
+            || {
+                let mut builder = client.blogs(blog_name.to_owned()).drafts();
+                if let Some(id) = before_id {
+                    builder = builder.before_id(id.to_owned());
+                }
+                builder.send()
+            },
+            quiet,
+        )
+        .await
+        .map(|r| r.posts),
+        SpecialKind::Queue => api::send_with_retries(
+            || {
+                let mut builder = client.blogs(blog_name.to_owned()).queue();
+                if offset > 0 {
+                    builder = builder.offset(offset);
+                }
+                builder.send()
+            },
+            quiet,
+        )
+        .await
+        .map(|r| r.posts),
+        SpecialKind::Submissions => api::send_with_retries(
+            || {
+                let mut builder = client.blogs(blog_name.to_owned()).submissions();
+                if offset > 0 {
+                    builder = builder.offset(offset);
+                }
+                builder.send()
+            },
+            quiet,
+        )
+        .await
+        .map(|r| r.posts),
+    }
+}
+
+/// Backs up one special collection (drafts, queue, or submissions) into its
+/// subdirectory of the output dir. These sets are small and mutate freely
+/// between runs (posts leave the queue when published), so no pagination
+/// state is persisted: every run re-fetches the whole collection and
+/// rewrites its files, meaning an interrupt here costs nothing on --resume.
+async fn backup_special(
+    client: &Crabrave,
+    config: &ResolvedConfig,
+    renderer: Option<&PostRenderer<'_>>,
+    kind: SpecialKind,
+) -> anyhow::Result<()> {
+    if !config.quiet {
+        say!("Backing up {}...", kind.plural())?;
+    }
+
+    let subdir = config.output_dir.join(kind.dir_name());
+    if !fs_err::exists(&subdir)? {
+        fs_err::create_dir_all(&subdir)?;
+    }
+
+    let download_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let media_dir = config.output_dir.join("media").join("images");
+    // Files live one level below the output dir (two with --directories), so
+    // the shared media store needs a deeper relative prefix than the main
+    // backup uses.
+    let relative_media_prefix = if config.directories {
+        "../../media/images/"
+    } else {
+        "../media/images/"
+    };
+
+    let mut archived: u64 = 0;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut before_id: Option<String> = None;
+    let mut offset: u64 = 0;
+
+    loop {
+        let posts = fetch_special_page(
+            client,
+            &config.blog_name,
+            kind,
+            before_id.as_deref(),
+            offset,
+            config.quiet,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "fetching {} (the blog must belong to the authenticated account)",
+                kind.plural()
+            )
+        })?;
+        if posts.is_empty() {
+            break;
+        }
+
+        let new_posts: Vec<&Post> = posts.iter().filter(|p| !seen_ids.contains(&p.id)).collect();
+        // A page of only re-seen posts means the server is not honoring our
+        // pagination; stop rather than refetch the same page forever.
+        if new_posts.is_empty() {
+            break;
+        }
+
+        let url_map: HashMap<String, String> = if config.save_images {
+            let urls: Vec<String> = new_posts
+                .iter()
+                .flat_map(|p| collect_image_urls(p))
+                .collect();
+            if urls.is_empty() {
+                HashMap::new()
+            } else {
+                download_images(
+                    client.client(),
+                    &urls,
+                    &media_dir,
+                    relative_media_prefix,
+                    &download_semaphore,
+                )
+                .await?
+            }
+        } else {
+            HashMap::new()
+        };
+
+        for &post in &new_posts {
+            ensure_numeric_id(&post.id)?;
+
+            let post: Cow<'_, Post> = if url_map.is_empty() {
+                Cow::Borrowed(post)
+            } else {
+                rewrite_post_image_urls(post, &url_map)
+            };
+
+            let output_file = if config.directories {
+                let post_dir = subdir.join(&post.id);
+                if !fs_err::exists(&post_dir)? {
+                    fs_err::create_dir(&post_dir)?;
+                }
+                post_dir.join(if config.json { "index.json" } else { "index.html" })
+            } else {
+                let ext = if config.json { "json" } else { "html" };
+                subdir.join(format!("{}.{ext}", post.id))
+            };
+
+            let content = if config.json {
+                render_json(&post, None)?
+            } else {
+                let r = renderer
+                    .ok_or_else(|| anyhow::anyhow!("renderer is required for HTML mode"))?;
+                // No nav chain among drafts/queue/submissions: close the
+                // older slot immediately.
+                r.render(&post, None, None)?
+                    .replace(OLDER_NAV_PLACEHOLDER, "<span></span>")
+            };
+            write_atomic(&output_file, content.as_bytes())?;
+            archived += 1;
+        }
+
+        for post in &posts {
+            seen_ids.insert(post.id.clone());
+        }
+        // Overlap the offset stride by one post, mirroring advance_window's
+        // deletion insurance: the queue is guaranteed to shrink under us
+        // (Tumblr publishes from it on a schedule), and a full stride would
+        // silently skip the post that shifts into the gap. Re-included posts
+        // are filtered by seen_ids.
+        offset += (posts.len() as u64).saturating_sub(1).max(1);
+        before_id = posts.last().map(|p| p.id.clone());
+    }
+
+    if !config.quiet {
+        say!("  {} {} archived", archived, kind.plural())?;
+    }
+
+    Ok(())
+}
+
 /// Replaces the older-nav placeholder in a previous run's last written post,
 /// linking it to the first post of the resumed run. Best-effort: if the file
 /// is gone or was already finalized (no placeholder), leave it alone.
@@ -610,16 +920,6 @@ fn heal_resumed_older_link(file: &camino::Utf8Path, older_html: &str) -> anyhow:
     Ok(())
 }
 
-/// Page-fetch deadline (crabrave sets no timeout of its own, so without this a
-/// stalled connection hangs the backup forever). 90s mirrors tumblr-utils.
-const PAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(90);
-/// Retries after the initial attempt, for transient API failures.
-const MAX_TRANSIENT_RETRIES: u32 = 3;
-/// Consecutive rate-limit sleeps tolerated while fetching a single page.
-const MAX_RATE_LIMIT_WAITS: u32 = 3;
-/// Refuse to sleep longer than this on a rate limit: a wait above an hour
-/// means the daily quota is exhausted, which only time will fix.
-const MAX_RATE_LIMIT_SLEEP_SECS: u64 = 3600;
 /// Consecutive pages yielding no unseen posts before concluding pagination is
 /// not making progress.
 const MAX_STALLED_PAGES: u32 = 3;
@@ -638,9 +938,7 @@ fn spawn_fetch(
     tokio::spawn(async move { fetch_page(&client, &blog_name, cursor, window_offset, quiet).await })
 }
 
-/// Fetches one page of posts with a per-request timeout, bounded retries with
-/// exponential backoff on transient errors, and rate-limit sleeps honoring the
-/// API's requested wait.
+/// Fetches one page of posts with the shared timeout/retry/rate-limit policy.
 async fn fetch_page(
     client: &Crabrave,
     blog_name: &str,
@@ -648,87 +946,20 @@ async fn fetch_page(
     window_offset: u64,
     quiet: bool,
 ) -> anyhow::Result<PostsResponse> {
-    let mut transient_attempts: u32 = 0;
-    let mut rate_limit_waits: u32 = 0;
-
-    loop {
-        let mut builder = client
-            .blogs(blog_name.to_owned())
-            .posts()
-            .before(before_cursor);
-        if window_offset > 0 {
-            builder = builder.offset(window_offset);
-        }
-
-        let error: anyhow::Error =
-            match tokio::time::timeout(PAGE_FETCH_TIMEOUT, builder.send()).await {
-                Ok(Ok(response)) => return Ok(response),
-                Ok(Err(CrabError::RateLimit { retry_after })) => match retry_after {
-                    Some(secs) if secs > MAX_RATE_LIMIT_SLEEP_SECS => {
-                        return Err(anyhow::anyhow!(
-                            "Hit rate limit; the API asks for a {secs}s wait (over an hour, so \
-                         the daily quota is likely exhausted). Use --resume to continue \
-                         from where you left off later."
-                        ));
-                    }
-                    Some(secs) if rate_limit_waits < MAX_RATE_LIMIT_WAITS => {
-                        rate_limit_waits += 1;
-                        if !quiet {
-                            say!(
-                                "  Rate limited; waiting {secs}s before retrying \
-                             ({rate_limit_waits}/{MAX_RATE_LIMIT_WAITS})..."
-                            )?;
-                        }
-                        tokio::time::sleep(Duration::from_secs(secs)).await;
-                        continue;
-                    }
-                    Some(_) => {
-                        return Err(anyhow::anyhow!(
-                            "Still rate limited after {MAX_RATE_LIMIT_WAITS} waits. \
-                         Use --resume to continue from where you left off."
-                        ));
-                    }
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "Hit rate limit, please retry later. \
-                         Use --resume to continue from where you left off."
-                        ));
-                    }
-                },
-                Ok(Err(e)) if is_transient(&e) => anyhow::Error::new(e),
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_elapsed) => {
-                    anyhow::anyhow!("request timed out after {}s", PAGE_FETCH_TIMEOUT.as_secs())
-                }
-            };
-
-        transient_attempts += 1;
-        if transient_attempts > MAX_TRANSIENT_RETRIES {
-            return Err(error.context(format!("giving up after {MAX_TRANSIENT_RETRIES} retries")));
-        }
-        let backoff = 1u64 << (transient_attempts - 1);
-        log::info!(
-            "transient API error ({error:#}); retrying in {backoff}s \
-             (attempt {transient_attempts}/{MAX_TRANSIENT_RETRIES})"
-        );
-        tokio::time::sleep(Duration::from_secs(backoff)).await;
-    }
-}
-
-/// Whether an API error is worth retrying.
-fn is_transient(e: &CrabError) -> bool {
-    match e {
-        // Transport-level failures (connect refused, reset, mid-body drop).
-        CrabError::Http(_) | CrabError::HttpClient(_) => true,
-        // `status` here comes from Tumblr's JSON error envelope.
-        CrabError::Api { status, .. } => matches!(*status, 500 | 502 | 503 | 504),
-        // Gateway error pages (a proxy's raw 502/503 HTML) aren't JSON, so
-        // they surface as parse failures; treating those as transient costs a
-        // genuine schema break only three quick retries before the same error
-        // is returned.
-        CrabError::Serialization(_) => true,
-        _ => false,
-    }
+    api::send_with_retries(
+        || {
+            let mut builder = client
+                .blogs(blog_name.to_owned())
+                .posts()
+                .before(before_cursor);
+            if window_offset > 0 {
+                builder = builder.offset(window_offset);
+            }
+            builder.send()
+        },
+        quiet,
+    )
+    .await
 }
 
 /// Decides the next pagination window after a fetched batch.
@@ -801,5 +1032,80 @@ mod tests {
     fn post_relative_href_modes() {
         assert_eq!(post_relative_href("123", false), "123.html");
         assert_eq!(post_relative_href("123", true), "../123/");
+    }
+
+    #[test]
+    fn ensure_numeric_id_accepts_digits_only() {
+        assert!(ensure_numeric_id("1234567890").is_ok());
+        assert!(ensure_numeric_id("").is_err());
+        assert!(ensure_numeric_id("../etc/passwd").is_err());
+        assert!(ensure_numeric_id("123abc").is_err());
+    }
+
+    fn minimal_post() -> Post {
+        let json = serde_json::json!({
+            "id_string": "123",
+            "blog_name": "test",
+            "post_url": "https://test.tumblr.com/post/123",
+            "type": "text",
+            "timestamp": 1700000000,
+            "scheduled_publish_time": 0,
+            "note_count": 0,
+            "reblog_key": "abc",
+            "is_blocks_post_format": true,
+            "followed": false,
+            "liked": false,
+            "can_like": false,
+            "can_reblog": false,
+            "can_reply": false,
+            "can_send_in_message": false,
+            "can_mute": false,
+            "display_avatar": false,
+            "interactability_reblog": "",
+            "is_blazed": false,
+            "is_blaze_pending": false,
+            "can_ignite": false,
+            "can_blaze": false,
+            "muted": false,
+            "mute_end_timestamp": 0,
+            "content": [],
+            "trail": [],
+            "tags": [],
+            "layout": []
+        });
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn render_json_without_notes_matches_plain_post() {
+        let post = minimal_post();
+        let json = render_json(&post, None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("notes").is_none());
+        // Post deserializes from `id_string` but serializes back out as `id`.
+        assert_eq!(value["id"], "123");
+    }
+
+    #[test]
+    fn render_json_embeds_notes() {
+        let post = minimal_post();
+        let notes = PostNotes {
+            total_notes: 1,
+            notes: vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "like",
+                    "timestamp": 1700000100,
+                    "blog_name": "liker",
+                }))
+                .unwrap(),
+            ],
+            rollup_notes: vec![],
+        };
+        let json = render_json(&post, Some(&notes)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["notes"]["total_notes"], 1);
+        assert_eq!(value["notes"]["notes"][0]["blog_name"], "liker");
+        // The post's own fields are still present alongside the notes.
+        assert_eq!(value["id"], "123");
     }
 }

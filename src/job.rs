@@ -46,6 +46,16 @@ pub struct JobState {
     #[serde(default)]
     pub save_images: bool,
     #[serde(default)]
+    pub save_notes: bool,
+    #[serde(default)]
+    pub notes_limit: Option<u64>,
+    #[serde(default)]
+    pub drafts: bool,
+    #[serde(default)]
+    pub queue: bool,
+    #[serde(default)]
+    pub submissions: bool,
+    #[serde(default)]
     pub template_path: Option<Utf8PathBuf>,
 }
 
@@ -64,6 +74,11 @@ impl JobState {
             json: config.json,
             directories: config.directories,
             save_images: config.save_images,
+            save_notes: config.save_notes,
+            notes_limit: config.notes_limit,
+            drafts: config.drafts,
+            queue: config.queue,
+            submissions: config.submissions,
             template_path: config.template_path.clone(),
         }
     }
@@ -109,6 +124,11 @@ mod tests {
             json: true,
             directories: false,
             save_images: true,
+            save_notes: true,
+            notes_limit: Some(100),
+            drafts: true,
+            queue: false,
+            submissions: false,
             template_path: Some(Utf8PathBuf::from("my-template.html")),
         }
     }
@@ -133,6 +153,11 @@ mod tests {
         assert!(deserialized.json);
         assert!(!deserialized.directories);
         assert!(deserialized.save_images);
+        assert!(deserialized.save_notes);
+        assert_eq!(deserialized.notes_limit, Some(100));
+        assert!(deserialized.drafts);
+        assert!(!deserialized.queue);
+        assert!(!deserialized.submissions);
         assert_eq!(
             deserialized.template_path,
             Some(Utf8PathBuf::from("my-template.html"))
@@ -155,6 +180,11 @@ mod tests {
         assert!(!job.json);
         assert!(!job.directories);
         assert!(!job.save_images);
+        assert!(!job.save_notes);
+        assert_eq!(job.notes_limit, None);
+        assert!(!job.drafts);
+        assert!(!job.queue);
+        assert!(!job.submissions);
         assert_eq!(job.template_path, None);
     }
 

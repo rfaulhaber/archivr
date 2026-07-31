@@ -55,6 +55,39 @@ pub struct Args {
     pub json: bool,
 
     #[arg(
+        long,
+        help = "Fetch and archive each post's notes (likes, reblogs, replies)"
+    )]
+    pub save_notes: bool,
+
+    #[arg(
+        long,
+        requires = "save_notes",
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Maximum number of notes to fetch per post, newest first (default: all)"
+    )]
+    pub notes_limit: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Also back up the blog's draft posts (the blog must belong to the authenticated user)"
+    )]
+    pub drafts: bool,
+
+    #[arg(
+        long,
+        help = "Also back up the blog's queued posts (the blog must belong to the authenticated user)"
+    )]
+    pub queue: bool,
+
+    #[arg(
+        long,
+        help = "Also back up the blog's post submissions (the blog must belong to the authenticated user)"
+    )]
+    pub submissions: bool,
+
+    #[arg(
         short,
         long,
         help = "Path to output posts to, defaulting to ./{blog-name}"
@@ -125,6 +158,11 @@ impl std::fmt::Debug for Args {
             .field("directories", &self.directories)
             .field("save_images", &self.save_images)
             .field("json", &self.json)
+            .field("save_notes", &self.save_notes)
+            .field("notes_limit", &self.notes_limit)
+            .field("drafts", &self.drafts)
+            .field("queue", &self.queue)
+            .field("submissions", &self.submissions)
             .field("output_dir", &self.output_dir)
             .field("before", &self.before)
             .field("after", &self.after)
@@ -202,6 +240,34 @@ mod tests {
         assert!(!debug.contains("secret-sensitive-value"));
         assert!(debug.contains("<redacted>"));
         assert!(debug.contains("myblog"));
+    }
+
+    #[test]
+    fn notes_limit_requires_save_notes() {
+        let result = Args::try_parse_from(["archivr", "myblog", "--notes-limit", "50"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn notes_limit_rejects_zero() {
+        let result =
+            Args::try_parse_from(["archivr", "myblog", "--save-notes", "--notes-limit", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn notes_limit_parses_with_save_notes() {
+        let args = Args::parse_from(["archivr", "myblog", "--save-notes", "--notes-limit", "50"]);
+        assert!(args.save_notes);
+        assert_eq!(args.notes_limit, Some(50));
+    }
+
+    #[test]
+    fn special_backup_flags_parse() {
+        let args = Args::parse_from(["archivr", "myblog", "--drafts", "--queue", "--submissions"]);
+        assert!(args.drafts);
+        assert!(args.queue);
+        assert!(args.submissions);
     }
 
     #[test]

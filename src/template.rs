@@ -3,9 +3,11 @@
 //! This module provides the templating infrastructure for formatting Tumblr posts.
 //! Users can provide custom Jinja templates or use the built-in default.
 
-use crabrave::handlers::blog::{Post, TrailItem};
+use crabrave::handlers::blog::{Note, Post, TrailItem};
 use crabrave::npf::{ContentBlock, InlineFormat};
 use minijinja::{AutoEscape, Environment, Value, context};
+
+use crate::notes::PostNotes;
 
 /// Default HTML template for rendering posts
 pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
@@ -52,6 +54,15 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
     .post-nav a { color: #0066cc; text-decoration: none; }
     .post-nav a:hover { text-decoration: underline; }
     .post-nav:not(:has(a)) { display: none; }
+    .notes { margin-top: 1.5rem; border-top: 1px solid #ddd; padding-top: 1rem; }
+    .notes summary { cursor: pointer; color: #666; }
+    .notes-list { list-style: none; padding: 0; margin: 0.5rem 0 0 0; font-size: 0.9rem; }
+    .notes-list li { padding: 0.25rem 0; border-bottom: 1px solid #f0f0f0; }
+    .notes-list a { color: #0066cc; text-decoration: none; }
+    .notes-list a:hover { text-decoration: underline; }
+    .note-reply { color: #333; }
+    .note-tags { color: #888; }
+    .note-date { color: #aaa; font-size: 0.8rem; }
   </style>
 </head>
 <body>
@@ -89,6 +100,35 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
       <span class="tag">#{{ tag }}</span>
       {%- endfor %}
     </div>
+    {%- endif %}
+
+    {%- if notes and (notes.notes or notes.rollup_notes) %}
+    <details class="notes">
+      <summary>{{ notes.total }} notes{% if (notes.notes | length) < notes.total %} ({{ notes.notes | length }} archived){% endif %}</summary>
+      <ol class="notes-list">
+        {%- for note in notes.notes %}
+        <li class="note {{ note.note_type }}">
+          {%- if note.blog_url %}<a href="{{ note.blog_url | safe_url }}">{{ note.blog_name }}</a>{%- else %}{{ note.blog_name }}{%- endif %}
+          {%- if note.note_type == "like" %} liked this
+          {%- elif note.note_type == "reblog" %} reblogged this{% if note.reblog_parent_blog_name %} from {{ note.reblog_parent_blog_name }}{% endif %}
+          {%- elif note.note_type == "reply" %} replied: <span class="note-reply">{{ note.reply_text }}</span>
+          {%- elif note.note_type == "posted" %} posted this
+          {%- else %} {{ note.note_type }}
+          {%- endif %}
+          {%- if note.added_text %}: <span class="note-reply">{{ note.added_text }}</span>{% endif %}
+          {%- if note.tags %} <span class="note-tags">{% for tag in note.tags %}#{{ tag }} {% endfor %}</span>{% endif %}
+          {%- if note.date %} <span class="note-date">&middot; {{ note.date }}</span>{% endif %}
+        </li>
+        {%- endfor %}
+        {%- for note in notes.rollup_notes %}
+        <li class="note rollup">
+          {%- if note.blog_url %}<a href="{{ note.blog_url | safe_url }}">{{ note.blog_name }}</a>{%- else %}{{ note.blog_name }}{%- endif %}
+          {{ note.note_type }}
+          {%- if note.date %} <span class="note-date">&middot; {{ note.date }}</span>{% endif %}
+        </li>
+        {%- endfor %}
+      </ol>
+    </details>
     {%- endif %}
   </article>
   <nav class="post-nav">
@@ -449,6 +489,38 @@ fn content_block_to_value(block: &ContentBlock) -> Value {
     }
 }
 
+/// Formats a Unix timestamp as a human-readable UTC date for note lines.
+fn format_note_date(timestamp: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+}
+
+/// Converts a Note to a minijinja Value
+fn note_to_value(note: &Note) -> Value {
+    context! {
+        note_type => note.note_type,
+        timestamp => note.timestamp,
+        date => format_note_date(note.timestamp),
+        blog_name => note.blog_name,
+        blog_url => note.blog_url,
+        reply_text => note.reply_text,
+        added_text => note.added_text,
+        reblog_parent_blog_name => note.reblog_parent_blog_name,
+        tags => note.tags,
+    }
+}
+
+/// Converts a post's captured notes to a minijinja Value
+fn notes_to_value(notes: &PostNotes) -> Value {
+    let note_values: Vec<Value> = notes.notes.iter().map(note_to_value).collect();
+    let rollup_values: Vec<Value> = notes.rollup_notes.iter().map(note_to_value).collect();
+    context! {
+        total => notes.total_notes,
+        notes => note_values,
+        rollup_notes => rollup_values,
+    }
+}
+
 /// Converts a TrailItem to a minijinja Value
 fn trail_item_to_value(item: &TrailItem) -> Value {
     let content: Vec<Value> = item.content.iter().map(content_block_to_value).collect();
@@ -527,8 +599,15 @@ impl<'a> PostRenderer<'a> {
 
     /// Renders a post to HTML
     ///
-    /// `newer_href` is an optional relative link to the next-newer post for navigation.
-    pub fn render(&self, post: &Post, newer_href: Option<&str>) -> anyhow::Result<String> {
+    /// `newer_href` is an optional relative link to the next-newer post for
+    /// navigation; `notes` carries the post's captured notes when
+    /// `--save-notes` is active.
+    pub fn render(
+        &self,
+        post: &Post,
+        newer_href: Option<&str>,
+        notes: Option<&PostNotes>,
+    ) -> anyhow::Result<String> {
         let template = self.env.get_template(self.template_name)?;
         let post_value = post_to_value(post);
         let ctx = context! {
@@ -536,6 +615,7 @@ impl<'a> PostRenderer<'a> {
             is_reblog => post.reblogged_from_name.is_some(),
             is_original => post.reblogged_from_name.is_none(),
             newer_href => newer_href,
+            notes => notes.map(notes_to_value),
         };
         let result = template.render(ctx)?;
         Ok(result)
@@ -891,7 +971,7 @@ mod tests {
             formatting: None,
         }];
 
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("&lt;script&gt;"));
         assert!(!html.contains("<script>"));
     }
@@ -900,7 +980,7 @@ mod tests {
     fn render_sanitizes_post_url_href() {
         let mut post = minimal_post();
         post.post_url = "javascript:alert(1)".to_owned();
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(!html.contains("javascript:"));
         assert!(html.contains(r##"<a href="#">"##));
     }
@@ -909,7 +989,7 @@ mod tests {
     fn render_keeps_normal_post_url_href() {
         let mut post = minimal_post();
         post.post_url = "https://test.tumblr.com/post/123".to_owned();
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"<a href="https://test.tumblr.com/post/123">"#));
     }
 
@@ -919,7 +999,7 @@ mod tests {
         post.blog_name = "<b>evil</b>".to_string();
         post.tags = vec!["<img src=x onerror=alert(1)>".to_string()];
 
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("&lt;b&gt;evil"));
         assert!(!html.contains("<img src=x"));
     }
@@ -934,7 +1014,7 @@ mod tests {
         .unwrap();
         post.content = vec![block];
 
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         // Provider embed markup is trusted oEmbed HTML and must pass through unescaped.
         assert!(html.contains("<iframe src=\"https://example.com\"></iframe>"));
     }
@@ -949,7 +1029,7 @@ mod tests {
         .unwrap();
         post.content = vec![block];
 
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"<audio controls src="https://cdn.tumblr.com/track.mp3">"#));
     }
 
@@ -977,7 +1057,7 @@ mod tests {
     #[test]
     fn render_applies_bold_formatting() {
         let post = text_block("hello world", vec![fmt(0, 5, "bold")]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("<strong>hello</strong> world"));
     }
 
@@ -986,7 +1066,7 @@ mod tests {
         let mut link = fmt(0, 4, "link");
         link.url = Some("https://example.com/?a=1&b=2".to_owned());
         let post = text_block("here", vec![link]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"<a href="https://example.com/?a=1&amp;b=2">here</a>"#));
     }
 
@@ -995,7 +1075,7 @@ mod tests {
         let mut link = fmt(0, 4, "link");
         link.url = Some("javascript:alert(1)".to_owned());
         let post = text_block("here", vec![link]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(!html.contains("javascript:"));
         assert!(html.contains(r##"<a href="#">here</a>"##));
     }
@@ -1006,7 +1086,7 @@ mod tests {
         // Embedded tab/newline that browsers ignore when resolving the scheme.
         link.url = Some("java\tscript:\nalert(1)".to_owned());
         let post = text_block("here", vec![link]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(!html.to_ascii_lowercase().contains("javascript"));
     }
 
@@ -1015,7 +1095,7 @@ mod tests {
         let mut color = fmt(0, 3, "color");
         color.hex = Some("red;background:url(x)".to_owned());
         let post = text_block("abc", vec![color]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(!html.contains("style="));
         assert!(html.contains("abc"));
     }
@@ -1025,7 +1105,7 @@ mod tests {
         let mut color = fmt(0, 3, "color");
         color.hex = Some("#ff0000".to_owned());
         let post = text_block("abc", vec![color]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"<span style="color:#ff0000">abc</span>"#));
     }
 
@@ -1034,14 +1114,14 @@ mod tests {
         let mut link = fmt(0, 4, "link");
         link.url = Some("https://example.com/page".to_owned());
         let post = text_block("here", vec![link]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"<a href="https://example.com/page">here</a>"#));
     }
 
     #[test]
     fn render_escapes_inside_formatting() {
         let post = text_block("a<b>c", vec![fmt(0, 5, "italic")]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("<em>a&lt;b&gt;c</em>"));
     }
 
@@ -1049,7 +1129,7 @@ mod tests {
     fn render_formatting_uses_utf16_offsets() {
         // The emoji is two UTF-16 code units, so bolding "bold" starts at index 2.
         let post = text_block("😀bold", vec![fmt(2, 6, "bold")]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("😀<strong>bold</strong>"));
     }
 
@@ -1059,7 +1139,7 @@ mod tests {
         // re-opens bold rather than spanning the boundary, which is redundant but
         // well-formed HTML.
         let post = text_block("abcdefg", vec![fmt(0, 7, "bold"), fmt(4, 7, "italic")]);
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains("<strong>abcd</strong><strong><em>efg</em></strong>"));
     }
 
@@ -1072,9 +1152,97 @@ mod tests {
             formatting: None,
         }];
 
-        let html = PostRenderer::new().unwrap().render(&post, None).unwrap();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
         assert!(html.contains(r#"class="content-block heading1""#));
         assert!(html.contains("A heading"));
+    }
+
+    fn note(json: serde_json::Value) -> Note {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn sample_notes() -> PostNotes {
+        PostNotes {
+            total_notes: 2,
+            notes: vec![
+                note(serde_json::json!({
+                    "type": "like",
+                    "timestamp": 1700000100,
+                    "blog_name": "liker",
+                    "blog_url": "https://liker.tumblr.com/",
+                })),
+                note(serde_json::json!({
+                    "type": "reply",
+                    "timestamp": 1700000200,
+                    "blog_name": "replier",
+                    "reply_text": "nice <script>alert(1)</script>",
+                })),
+            ],
+            rollup_notes: vec![],
+        }
+    }
+
+    #[test]
+    fn render_without_notes_omits_details_block() {
+        let post = minimal_post();
+        let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
+        assert!(!html.contains("<details class=\"notes\">"));
+    }
+
+    #[test]
+    fn render_notes_details_block() {
+        let post = minimal_post();
+        let notes = sample_notes();
+        let html = PostRenderer::new()
+            .unwrap()
+            .render(&post, None, Some(&notes))
+            .unwrap();
+        assert!(html.contains("<details class=\"notes\">"));
+        assert!(html.contains("2 notes"));
+        // All notes archived → no truncation marker.
+        assert!(!html.contains("archived)"));
+        assert!(html.contains(r#"<a href="https://liker.tumblr.com/">liker</a>"#));
+        assert!(html.contains("liked this"));
+        assert!(html.contains("replied:"));
+        // Reply text is untrusted and must be escaped.
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>alert"));
+    }
+
+    #[test]
+    fn render_notes_marks_truncated_fetch() {
+        let mut notes = sample_notes();
+        notes.total_notes = 100;
+        let post = minimal_post();
+        let html = PostRenderer::new()
+            .unwrap()
+            .render(&post, None, Some(&notes))
+            .unwrap();
+        assert!(html.contains("100 notes"));
+        assert!(html.contains("(2 archived)"));
+    }
+
+    #[test]
+    fn render_notes_sanitizes_blog_url() {
+        let mut notes = sample_notes();
+        notes.notes[0].blog_url = Some("javascript:alert(1)".to_owned());
+        let post = minimal_post();
+        let html = PostRenderer::new()
+            .unwrap()
+            .render(&post, None, Some(&notes))
+            .unwrap();
+        assert!(!html.contains("javascript:"));
+    }
+
+    #[test]
+    fn render_empty_notes_omits_details_block() {
+        let post = minimal_post();
+        let notes = PostNotes::default();
+        let html = PostRenderer::new()
+            .unwrap()
+            .render(&post, None, Some(&notes))
+            .unwrap();
+        assert!(!html.contains("<details class=\"notes\">"));
     }
 
     #[test]

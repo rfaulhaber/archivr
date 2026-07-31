@@ -61,6 +61,11 @@ This will kick off a job to back up an entire blog.
 | `--template`        | `-t`  | Custom Jinja template for HTML output (exclusive with `--json`)                    |
 | `--directories`     | `-d`  | Create a subdirectory for each post                                                |
 | `--save-images`     |       | Download post images locally instead of linking to CDN                             |
+| `--save-notes`      |       | Fetch and archive each post's notes (likes, reblogs, replies)                      |
+| `--notes-limit`     |       | Maximum notes to fetch per post, newest first (requires `--save-notes`)            |
+| `--drafts`          |       | Also back up the blog's drafts (blog must belong to the authenticated user)        |
+| `--queue`           |       | Also back up the blog's queued posts (blog must belong to the authenticated user)  |
+| `--submissions`     |       | Also back up the blog's submissions (blog must belong to the authenticated user)   |
 | `--before`          |       | Only fetch posts before this date (Unix timestamp or RFC3339)                      |
 | `--after`           |       | Only fetch posts after this date (Unix timestamp or RFC3339)                       |
 | `--resume`          |       | Resume a previously interrupted backup                                             |
@@ -103,6 +108,30 @@ If no prior state file exists (e.g. the first time you use `--incremental`), arc
 
 `--incremental` is mutually exclusive with `--resume` and `--after`. If a previous run was interrupted, finish it with `--resume` first, then run `--incremental` next time.
 
+### Notes backup
+
+`--save-notes` archives each post's notes — likes, reblogs (including any added commentary and tags), and replies — through the Tumblr API:
+
+```sh
+archivr my-blog --consumer-key KEY --consumer-secret SECRET --save-notes
+```
+
+In HTML output, notes appear in a collapsible section at the bottom of each post. In `--json` output, they're embedded in each post's file under a `notes` key (with `total_notes`, `notes`, and `rollup_notes` fields).
+
+Each post's notes cost at least one extra API request (more for heavily-noted posts, which are paginated), so backups of large blogs run noticeably longer and eat into Tumblr's rate limits sooner — rate-limit waits are handled automatically the same way as regular post fetches. For popular posts with tens of thousands of notes, `--notes-limit N` caps the fetch at the `N` newest notes.
+
+### Drafts, queue, and submissions
+
+Because archivr authenticates with OAuth, it can back up posts that never appear on the public blog — often the only copies that exist anywhere:
+
+```sh
+archivr my-blog --consumer-key KEY --consumer-secret SECRET --drafts --queue --submissions
+```
+
+Each flag adds a collection to the normal backup, written to its own subdirectory of the output dir (`drafts/`, `queue/`, `submissions/`) in the same format (HTML or `--json`) as the rest of the archive. The blog must belong to the authenticated account — Tumblr rejects these requests for blogs you don't own.
+
+These collections are small and change freely between runs (queued posts leave the queue when published), so they're re-fetched in full on every run, including `--incremental` ones. Files for posts that have since been deleted or published stay on disk.
+
 ### Job config file
 
 You can specify all of the CLI arguments in a config file as well, passing `--config-file <PATH>` instead.
@@ -129,6 +158,7 @@ Your template receives the following variables:
 | `is_reblog` | bool | `true` if the post was reblogged from another blog |
 | `is_original` | bool | `true` if the post is original content |
 | `newer_href` | string? | Relative URL to the next-newer post (for navigation links) |
+| `notes` | object? | The post's captured notes when `--save-notes` is active: `total` (server-reported count), `notes`, and `rollup_notes` (lists of note objects with `note_type`, `timestamp`, `date`, `blog_name`, `blog_url`, `reply_text`, `added_text`, `reblog_parent_blog_name`, and `tags`) |
 
 #### Post fields
 
@@ -274,5 +304,4 @@ The following features are not yet implemented but are planned for future releas
 - Video and audio downloading (`--save-video`, `--save-audio`)
 - Liked posts backup (`--likes`)
 - Tag filtering (`--include-tags`)
-- Notes backup (`--save-notes`)
 - Index page generation (`--index-file`)

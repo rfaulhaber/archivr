@@ -67,13 +67,48 @@ clock, so posts stamped ahead of local time surface on the next run.
 
 ## Phase 3 — Leapfrog features
 
-### 12. Notes backup via API (--save-notes)
+### 12. [DONE 2026-07-31] Notes backup via API (--save-notes)
 
 Leapfrog feature: tumblr-utils scrapes post HTML pages for notes (subprocess, breaks on Safe Mode interstitials); archivr holds an OAuth token and can use crabrave's real API — blogs(id).notes(post_id) with NoteMode (All/Likes/Conversation/Rollup/ReblogsWithTags) and before_timestamp pagination. Add --save-notes (+ optional --notes-limit), render as a <details> block in the default template, include note data in --json output. Was already on the README planned list; the API route makes it strictly better than the inspiration.
 
-### 13. Drafts, queue, and submissions backup
+Implementation notes (2026-07-31): fetch_page's timeout/retry/rate-limit policy was
+extracted into api::send_with_retries (generic over crabrave builders) and notes
+pagination lives in notes.rs, following the server's `_links` before_timestamp
+cursor with a strict-decrease guard against cursor loops. Notes fetch is skipped
+when note_count == 0. A 4xx on one post's notes warns and archives the post
+without notes (api::is_client_api_error distinguishes this from transient/rate
+-limit failures, which still abort resumably). JSON output embeds the collection
+under a `notes` key; --save-notes/--notes-limit persist in the job file for
+--resume. rollup_notes are captured alongside the primary list; --notes-limit
+caps only the primary list. Post-review hardening (adversarially verified with
+a live mock server): a MAX_NOTES_PAGES cap bounds a hostile strictly-decreasing
+cursor (which the decrease guard alone bounds only at ~2^63 pages); an
+unparseable body outliving the retry budget (WAF HTML on a 4xx) degrades that
+post's notes instead of aborting the run; and envelope-level 429s are excluded
+from the per-post-skippable class so they stay fatal.
+
+### 13. [DONE 2026-07-31] Drafts, queue, and submissions backup
 
 Feature tumblr-utils cannot offer at all (no OAuth): back up the authenticated user's drafts, queued posts, and submissions — the only copies that exist anywhere. crabrave surface: blogs(id).drafts() (before_id/filter), blogs(id).queue(), blogs(id).submissions(). Suggest flags like --drafts/--queue/--submissions (or a --private umbrella) writing to subdirectories, reusing the existing render/JSON pipeline.
+
+Implementation notes (2026-07-31): --drafts/--queue/--submissions are additive to
+the normal backup, writing to drafts/ / queue/ / submissions/ subdirectories via
+the shared render/JSON/image pipeline (media links point back into the shared
+store one level up; nav links disabled — the older-slot placeholder is closed
+immediately). Drafts paginate by before_id, queue/submissions by offset, each
+with a seen-id no-progress guard; the offset stride overlaps by one post as
+deletion insurance (the queue shrinks under us whenever Tumblr publishes from
+it on schedule), mirroring advance_window. Known accepted limits: `--resume`
+restores the job's saved flag set, so adding --drafts/--queue/--submissions on
+a resume of a job saved without them is silently ignored (consistent with all
+other job params); published/deleted drafts leave stale files behind (archival
+bias); specials never fetch notes even for a reverted-to-draft post that once
+had them. No pagination state is persisted: collections
+are small and mutate freely (queued posts publish themselves), so every run
+re-fetches wholesale; specials run after the main window but before job-file
+deletion, so a failure there leaves --resume able to re-run them. Research
+correction vs the sketch above: crabrave has no API-key-only path — one OAuth
+client serves everything, so no auth changes were needed.
 
 ## Phase 4 — Parity features
 

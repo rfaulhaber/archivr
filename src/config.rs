@@ -37,6 +37,11 @@ pub struct ResolvedConfig {
     pub directories: bool,
     pub save_images: bool,
     pub json: bool,
+    pub save_notes: bool,
+    pub notes_limit: Option<u64>,
+    pub drafts: bool,
+    pub queue: bool,
+    pub submissions: bool,
     pub resume: bool,
     pub incremental: bool,
     pub quiet: bool,
@@ -84,6 +89,11 @@ impl ResolvedConfig {
             directories: args.directories,
             save_images: args.save_images,
             json: args.json,
+            save_notes: args.save_notes,
+            notes_limit: args.notes_limit,
+            drafts: args.drafts,
+            queue: args.queue,
+            submissions: args.submissions,
             resume: args.resume,
             incremental: args.incremental,
             quiet: args.quiet,
@@ -102,6 +112,11 @@ impl ResolvedConfig {
         self.json = job.json;
         self.directories = job.directories;
         self.save_images = job.save_images;
+        self.save_notes = job.save_notes;
+        self.notes_limit = job.notes_limit;
+        self.drafts = job.drafts;
+        self.queue = job.queue;
+        self.submissions = job.submissions;
         self.template_path = job.template_path.clone();
     }
 }
@@ -124,6 +139,11 @@ mod tests {
             directories: false,
             save_images: false,
             json: false,
+            save_notes: false,
+            notes_limit: None,
+            drafts: false,
+            queue: false,
+            submissions: false,
             output_dir: Some(Utf8PathBuf::from("/tmp/test-output")),
             before: None,
             after: None,
