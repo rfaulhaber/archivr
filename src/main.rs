@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use archivr::{
-    Args, BackupState, JobState, PostNotes, PostRenderer, PostTimestamp, ResolvedConfig, api,
+    ArchiveIndex, Args, BackupState, JobState, PostNotes, PostRenderer, PostTimestamp,
+    ResolvedConfig, api,
     auth::authenticate,
     fsutil::write_atomic,
-    images::{
-        MAX_CONCURRENT_DOWNLOADS, collect_image_urls, download_images, rewrite_post_image_urls,
+    media::{
+        ExternalVideoDownloader, MAX_CONCURRENT_DOWNLOADS, MediaSelection, download_batch_media,
+        rewrite_post_media_urls,
     },
     notes::fetch_post_notes,
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
@@ -63,6 +65,20 @@ async fn main() -> anyhow::Result<()> {
 
     if config.incremental {
         match prior_state.as_ref() {
+            Some(s) if s.blog_name == config.blog_name
+                && s.filters != config.filter_descriptor() =>
+            {
+                return Err(anyhow::anyhow!(
+                    "state file at {} records a backup with filters `{}`, but this run \
+                     uses `{}`. An incremental run with different filters would leave \
+                     gaps. Either back up with these filters into a different output \
+                     directory, or delete the state file to make this run's filters \
+                     the directory's new incremental baseline.",
+                    state_file,
+                    s.filters.as_deref().unwrap_or("none"),
+                    config.filter_descriptor().as_deref().unwrap_or("none")
+                ));
+            }
             Some(s) if s.blog_name == config.blog_name => {
                 // Tumblr's `after` filter is exclusive on the second-granularity
                 // timestamp, so the boundary post is not re-fetched. Posts that
@@ -153,6 +169,33 @@ async fn main() -> anyhow::Result<()> {
         if job.submissions {
             params.push("--submissions".to_owned());
         }
+        if job.likes {
+            params.push("--likes".to_owned());
+        }
+        if !job.include_tags.is_empty() {
+            params.push(format!("--include-tags {}", job.include_tags.join(",")));
+        }
+        if let Some(ref t) = job.post_type {
+            params.push(format!("--type {t}"));
+        }
+        if job.no_reblogs {
+            params.push("--no-reblogs".to_owned());
+        }
+        if job.only_reblogs {
+            params.push("--only-reblogs".to_owned());
+        }
+        if job.save_video {
+            params.push("--save-video".to_owned());
+        }
+        if job.save_audio {
+            params.push("--save-audio".to_owned());
+        }
+        if job.save_video_external {
+            params.push("--save-video-external".to_owned());
+        }
+        if job.index_file {
+            params.push("--index-file".to_owned());
+        }
         if let Some(before) = job.before {
             params.push(format!("--before {before}"));
         }
@@ -206,24 +249,93 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let newest_observed =
-        run_backup(&client, &config, renderer.as_ref(), &mut job, &job_file).await?;
+    let index_metadata_path = ArchiveIndex::metadata_path(&config.output_dir);
+    let mut archive_index: Option<ArchiveIndex> = if config.index_file {
+        match ArchiveIndex::load(&index_metadata_path) {
+            Ok(Some(idx)) if idx.blog_name != config.blog_name => {
+                return Err(anyhow::anyhow!(
+                    "index metadata at {} is for blog `{}`, but `{}` was requested",
+                    index_metadata_path,
+                    idx.blog_name,
+                    config.blog_name
+                ));
+            }
+            Ok(Some(idx)) => Some(idx),
+            Ok(None) => Some(ArchiveIndex::new(&config.blog_name)),
+            Err(e) => {
+                // Not gated on --quiet: a fresh index silently dropping prior
+                // runs' entries is worth a line of output.
+                say!(
+                    "Warning: could not read the index metadata at {index_metadata_path} \
+                     ({e}); starting a fresh index. Run a full (non-incremental) backup \
+                     to repopulate it."
+                )?;
+                Some(ArchiveIndex::new(&config.blog_name))
+            }
+        }
+    } else {
+        None
+    };
+
+    // Probed once per run so a missing yt-dlp prints one notice, not one per
+    // batch.
+    let external_video = if config.save_video_external {
+        ExternalVideoDownloader::new(
+            &config.output_dir,
+            config.cookies_file.as_deref(),
+            config.quiet,
+        )
+        .await?
+    } else {
+        None
+    };
+
+    let newest_observed = run_backup(
+        &client,
+        &config,
+        renderer.as_ref(),
+        external_video.as_ref(),
+        archive_index.as_mut(),
+        &mut job,
+        &job_file,
+    )
+    .await?;
 
     if let Some(newest_ts) = newest_observed {
         let now = chrono::Utc::now().timestamp();
-        // Only floor against prior state from the same blog: a non-incremental
-        // run into another blog's directory must not inherit that blog's mark.
-        let prior_high_water = prior_state
+        let filters = config.filter_descriptor();
+        // Only floor against prior state from the same blog and the same
+        // filter set: a non-incremental run into another blog's directory (or
+        // a filtered one-off into a full archive) must not inherit that mark.
+        let prior_same_mode = prior_state
             .as_ref()
-            .filter(|s| s.blog_name == config.blog_name)
+            .filter(|s| s.blog_name == config.blog_name && s.filters == filters);
+        let prior_high_water = prior_same_mode
             .map(|s| s.newest_post_timestamp)
             .unwrap_or(0);
+        // A one-off run with a different filter set must not clobber the
+        // existing state either: its mark describes a different post set, and
+        // overwriting would break the directory's established incremental
+        // workflow.
+        let clobbers_other_mode = prior_state
+            .as_ref()
+            .is_some_and(|s| s.blog_name == config.blog_name && s.filters != filters);
         // The mark asserts "everything up to this timestamp is archived", so
         // it may only advance when this run's coverage is contiguous with the
         // archive below it. A run floored by --after above the prior mark (or
         // into a fresh directory) leaves a gap the mark must not paper over.
         // Incremental runs pass trivially: their floor IS the prior mark.
-        if config.after.is_none_or(|floor| floor <= prior_high_water) {
+        if clobbers_other_mode {
+            // Not gated on --quiet: the user may be counting on this run to
+            // (re)establish the incremental baseline, and it deliberately
+            // does not.
+            say!(
+                "Note: incremental state was not updated because this run's filters \
+                 differ from the ones the existing state was recorded with. Delete \
+                 {state_file} first if this run's filters should become the \
+                 directory's incremental baseline."
+            )?;
+        } else if config.after.is_none_or(|floor| floor <= prior_high_water) {
             let new_state = BackupState {
                 blog_name: config.blog_name.clone(),
                 last_run_at: now,
@@ -231,6 +343,7 @@ async fn main() -> anyhow::Result<()> {
                 // present so a single future-dated post can't push the
                 // incremental boundary past posts not yet written.
                 newest_post_timestamp: newest_ts.max(prior_high_water).min(now),
+                filters,
             };
             new_state.save(&state_file)?;
         } else {
@@ -246,7 +359,30 @@ async fn main() -> anyhow::Result<()> {
     // window quickly and re-runs the specials wholesale.
     for kind in SpecialKind::ALL {
         if kind.enabled(&config) {
-            backup_special(&client, &config, renderer.as_ref(), kind).await?;
+            backup_special(
+                &client,
+                &config,
+                renderer.as_ref(),
+                external_video.as_ref(),
+                kind,
+            )
+            .await?;
+        }
+    }
+
+    // Regenerated at the end of every run (incremental and resumed ones
+    // included), so the index always reflects the archive's current contents.
+    if let Some(idx) = archive_index.as_ref() {
+        idx.save(&index_metadata_path)?;
+        let special_dirs: Vec<&str> = SpecialKind::ALL
+            .iter()
+            .filter(|k| fs_err::exists(config.output_dir.join(k.dir_name())).unwrap_or(false))
+            .map(|k| k.dir_name())
+            .collect();
+        let html = idx.render_html(config.directories, config.json, &special_dirs);
+        write_atomic(&ArchiveIndex::html_path(&config.output_dir), html.as_bytes())?;
+        if !config.quiet {
+            say!("Wrote index.html ({} posts indexed)", idx.entries.len())?;
         }
     }
 
@@ -347,6 +483,8 @@ async fn run_backup(
     client: &Crabrave,
     config: &ResolvedConfig,
     renderer: Option<&PostRenderer<'_>>,
+    external_video: Option<&ExternalVideoDownloader>,
+    mut archive_index: Option<&mut ArchiveIndex>,
     job: &mut JobState,
     job_file: &camino::Utf8Path,
 ) -> anyhow::Result<Option<PostTimestamp>> {
@@ -367,16 +505,18 @@ async fn run_backup(
     let resume_newer_href: Option<String> = job.last_post_href.clone();
     let mut resume_heal_file: Option<camino::Utf8PathBuf> = job.last_post_file.clone();
 
-    // One download pool and one media store for the whole run: the shared
-    // store lets the hash-prefixed filenames dedup reblogged images across
-    // posts, which per-post media dirs used to defeat in --directories mode.
+    // One download pool and one media store per kind for the whole run: the
+    // shared store lets the hash-prefixed filenames dedup reblogged media
+    // across posts, which per-post media dirs used to defeat in --directories
+    // mode.
     let download_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
-    let media_dir = config.output_dir.join("media").join("images");
-    let relative_media_prefix = if config.directories {
-        "../media/images/"
-    } else {
-        "media/images/"
+    let media_selection = MediaSelection {
+        images: config.save_images,
+        video: config.save_video,
+        audio: config.save_audio,
     };
+    let media_depth = usize::from(config.directories);
+    let index_metadata_path = ArchiveIndex::metadata_path(&config.output_dir);
 
     // Pin the top of the pagination window when the job starts (+1 so a post
     // stamped in the start second is included even with an exclusive bound):
@@ -453,36 +593,48 @@ async fn run_backup(
                 pending_fetch = Some(spawn_fetch(client, config, next_cursor, next_window_offset));
             }
 
+            // Post-selection filters. A single `--include-tags` tag is also
+            // applied server-side, but multi-tag lists and the reblog filters
+            // exist only client-side. `--type` is deliberately not re-checked
+            // here: it is enforced server-side, and with NPF responses the
+            // returned `type` field reads `blocks` rather than the legacy
+            // type name the filter uses.
+            let selected: Vec<&Post> = new_posts
+                .iter()
+                .copied()
+                .filter(|p| {
+                    post_matches_filters(p, &config.include_tags, config.no_reblogs, config.only_reblogs)
+                })
+                .collect();
+
             log::info!(
-                "fetched {} posts (cursor {cursor}, {} new)",
+                "fetched {} posts (cursor {cursor}, {} new, {} selected)",
                 response.posts.len(),
-                new_posts.len()
+                new_posts.len(),
+                selected.len()
             );
 
-            // Download the whole batch's images through the shared pool before
-            // rendering, so single-image posts no longer serialize downloads.
-            let url_map: HashMap<String, String> = if config.save_images {
-                let urls: Vec<String> = new_posts
-                    .iter()
-                    .flat_map(|p| collect_image_urls(p))
-                    .collect();
-                if urls.is_empty() {
-                    HashMap::new()
-                } else {
-                    download_images(
-                        client.client(),
-                        &urls,
-                        &media_dir,
-                        relative_media_prefix,
-                        &download_semaphore,
-                    )
-                    .await?
-                }
+            // Download the whole batch's media through the shared pool before
+            // rendering, so single-file posts no longer serialize downloads.
+            let url_map: HashMap<String, String> = if media_selection.any() {
+                download_batch_media(
+                    client.client(),
+                    &selected,
+                    &config.output_dir,
+                    media_depth,
+                    media_selection,
+                    &download_semaphore,
+                )
+                .await?
             } else {
                 HashMap::new()
             };
 
-            for &post in &new_posts {
+            if let Some(external) = external_video {
+                external.download_batch(&selected).await?;
+            }
+
+            for &post in &selected {
                 ensure_numeric_id(&post.id)?;
 
                 log::info!("processing post {}", post.id);
@@ -496,7 +648,7 @@ async fn run_backup(
                 let post: Cow<'_, Post> = if url_map.is_empty() {
                     Cow::Borrowed(post)
                 } else {
-                    rewrite_post_image_urls(post, &url_map)
+                    rewrite_post_media_urls(post, &url_map)
                 };
 
                 if config.json {
@@ -562,6 +714,10 @@ async fn run_backup(
                     });
                 }
 
+                if let Some(idx) = archive_index.as_deref_mut() {
+                    idx.record(&post);
+                }
+
                 posts_archived += 1;
             }
 
@@ -584,6 +740,12 @@ async fn run_backup(
                 job.last_post_file = Some(b.output_file.clone());
             }
             job.save(job_file)?;
+            // Persisted in step with the job file so an interrupt loses no
+            // index entries for posts already on disk: a later --resume skips
+            // those posts and could never re-record them.
+            if let Some(idx) = archive_index.as_deref_mut() {
+                idx.save(&index_metadata_path)?;
+            }
 
             if !config.quiet {
                 say!("  {} posts archived", posts_archived)?;
@@ -682,22 +844,24 @@ async fn fetch_notes_for_post(
     }
 }
 
-/// The authenticated-user-only post collections backed up alongside the blog.
+/// The extra post collections backed up alongside the blog's own posts.
 #[derive(Clone, Copy)]
 enum SpecialKind {
     Drafts,
     Queue,
     Submissions,
+    Likes,
 }
 
 impl SpecialKind {
-    const ALL: [Self; 3] = [Self::Drafts, Self::Queue, Self::Submissions];
+    const ALL: [Self; 4] = [Self::Drafts, Self::Queue, Self::Submissions, Self::Likes];
 
     fn enabled(self, config: &ResolvedConfig) -> bool {
         match self {
             Self::Drafts => config.drafts,
             Self::Queue => config.queue,
             Self::Submissions => config.submissions,
+            Self::Likes => config.likes,
         }
     }
 
@@ -707,6 +871,7 @@ impl SpecialKind {
             Self::Drafts => "drafts",
             Self::Queue => "queue",
             Self::Submissions => "submissions",
+            Self::Likes => "likes",
         }
     }
 
@@ -715,12 +880,27 @@ impl SpecialKind {
             Self::Drafts => "drafts",
             Self::Queue => "queued posts",
             Self::Submissions => "submissions",
+            Self::Likes => "liked posts",
+        }
+    }
+
+    /// What the API demands for this collection, quoted in fetch errors.
+    fn requirement(self) -> &'static str {
+        match self {
+            Self::Drafts | Self::Queue | Self::Submissions => {
+                "the blog must belong to the authenticated account"
+            }
+            Self::Likes => {
+                "the blog's likes must be public, or the blog must belong to \
+                 the authenticated account"
+            }
         }
     }
 }
 
-/// Fetches one page of a special collection. Drafts paginate by `before_id`;
-/// queue and submissions by offset.
+/// Fetches one page of a special collection, returning the posts and, when
+/// the endpoint reports one, the collection's server-side total. Drafts
+/// paginate by `before_id`; queue, submissions, and likes by offset.
 async fn fetch_special_page(
     client: &Crabrave,
     blog_name: &str,
@@ -728,7 +908,7 @@ async fn fetch_special_page(
     before_id: Option<&str>,
     offset: u64,
     quiet: bool,
-) -> anyhow::Result<Vec<Post>> {
+) -> anyhow::Result<(Vec<Post>, Option<u64>)> {
     match kind {
         SpecialKind::Drafts => api::send_with_retries(
             || {
@@ -741,7 +921,7 @@ async fn fetch_special_page(
             quiet,
         )
         .await
-        .map(|r| r.posts),
+        .map(|r| (r.posts, None)),
         SpecialKind::Queue => api::send_with_retries(
             || {
                 let mut builder = client.blogs(blog_name.to_owned()).queue();
@@ -753,7 +933,7 @@ async fn fetch_special_page(
             quiet,
         )
         .await
-        .map(|r| r.posts),
+        .map(|r| (r.posts, None)),
         SpecialKind::Submissions => api::send_with_retries(
             || {
                 let mut builder = client.blogs(blog_name.to_owned()).submissions();
@@ -765,7 +945,19 @@ async fn fetch_special_page(
             quiet,
         )
         .await
-        .map(|r| r.posts),
+        .map(|r| (r.posts, None)),
+        SpecialKind::Likes => api::send_with_retries(
+            || {
+                let mut builder = client.blogs(blog_name.to_owned()).likes();
+                if offset > 0 {
+                    builder = builder.offset(offset);
+                }
+                builder.send()
+            },
+            quiet,
+        )
+        .await
+        .map(|r| (r.liked_posts, Some(r.liked_count))),
     }
 }
 
@@ -778,6 +970,7 @@ async fn backup_special(
     client: &Crabrave,
     config: &ResolvedConfig,
     renderer: Option<&PostRenderer<'_>>,
+    external_video: Option<&ExternalVideoDownloader>,
     kind: SpecialKind,
 ) -> anyhow::Result<()> {
     if !config.quiet {
@@ -790,23 +983,24 @@ async fn backup_special(
     }
 
     let download_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
-    let media_dir = config.output_dir.join("media").join("images");
-    // Files live one level below the output dir (two with --directories), so
-    // the shared media store needs a deeper relative prefix than the main
-    // backup uses.
-    let relative_media_prefix = if config.directories {
-        "../../media/images/"
-    } else {
-        "../media/images/"
+    let media_selection = MediaSelection {
+        images: config.save_images,
+        video: config.save_video,
+        audio: config.save_audio,
     };
+    // Files live one level below the output dir (two with --directories), so
+    // the shared media stores need a deeper relative prefix than the main
+    // backup uses.
+    let media_depth = 1 + usize::from(config.directories);
 
     let mut archived: u64 = 0;
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut before_id: Option<String> = None;
     let mut offset: u64 = 0;
+    let mut reported_total: Option<u64> = None;
 
     loop {
-        let posts = fetch_special_page(
+        let (posts, total) = fetch_special_page(
             client,
             &config.blog_name,
             kind,
@@ -815,12 +1009,8 @@ async fn backup_special(
             config.quiet,
         )
         .await
-        .with_context(|| {
-            format!(
-                "fetching {} (the blog must belong to the authenticated account)",
-                kind.plural()
-            )
-        })?;
+        .with_context(|| format!("fetching {} ({})", kind.plural(), kind.requirement()))?;
+        reported_total = reported_total.max(total);
         if posts.is_empty() {
             break;
         }
@@ -832,26 +1022,23 @@ async fn backup_special(
             break;
         }
 
-        let url_map: HashMap<String, String> = if config.save_images {
-            let urls: Vec<String> = new_posts
-                .iter()
-                .flat_map(|p| collect_image_urls(p))
-                .collect();
-            if urls.is_empty() {
-                HashMap::new()
-            } else {
-                download_images(
-                    client.client(),
-                    &urls,
-                    &media_dir,
-                    relative_media_prefix,
-                    &download_semaphore,
-                )
-                .await?
-            }
+        let url_map: HashMap<String, String> = if media_selection.any() {
+            download_batch_media(
+                client.client(),
+                &new_posts,
+                &config.output_dir,
+                media_depth,
+                media_selection,
+                &download_semaphore,
+            )
+            .await?
         } else {
             HashMap::new()
         };
+
+        if let Some(external) = external_video {
+            external.download_batch(&new_posts).await?;
+        }
 
         for &post in &new_posts {
             ensure_numeric_id(&post.id)?;
@@ -859,7 +1046,7 @@ async fn backup_special(
             let post: Cow<'_, Post> = if url_map.is_empty() {
                 Cow::Borrowed(post)
             } else {
-                rewrite_post_image_urls(post, &url_map)
+                rewrite_post_media_urls(post, &url_map)
             };
 
             let output_file = if config.directories {
@@ -903,6 +1090,22 @@ async fn backup_special(
         say!("  {} {} archived", archived, kind.plural())?;
     }
 
+    // Likes is the one collection whose endpoint reports a total, and the one
+    // where offset pagination is known to fall short of it: Tumblr only
+    // exposes the most recent ~1000 likes this way. (Reaching further needs
+    // liked-timestamp cursoring, which crabrave 1.1.1 does not surface.)
+    // Not gated on --quiet: an archive silently missing likes contradicts an
+    // explicit --likes.
+    if let Some(total) = reported_total
+        && archived < total
+    {
+        say!(
+            "  Note: the blog reports {total} likes but only {archived} were \
+             reachable; Tumblr's API exposes only the most recent likes via \
+             this endpoint."
+        )?;
+    }
+
     Ok(())
 }
 
@@ -935,7 +1138,17 @@ fn spawn_fetch(
     let client = client.clone();
     let blog_name = config.blog_name.clone();
     let quiet = config.quiet;
-    tokio::spawn(async move { fetch_page(&client, &blog_name, cursor, window_offset, quiet).await })
+    // The API's `tag` param takes a single tag, so only a one-tag filter can
+    // be pushed server-side; longer lists are matched client-side instead.
+    let tag = if config.include_tags.len() == 1 {
+        config.include_tags.first().cloned()
+    } else {
+        None
+    };
+    let post_type = config.post_type.clone();
+    tokio::spawn(async move {
+        fetch_page(&client, &blog_name, cursor, window_offset, tag, post_type, quiet).await
+    })
 }
 
 /// Fetches one page of posts with the shared timeout/retry/rate-limit policy.
@@ -944,6 +1157,8 @@ async fn fetch_page(
     blog_name: &str,
     before_cursor: PostTimestamp,
     window_offset: u64,
+    tag: Option<String>,
+    post_type: Option<String>,
     quiet: bool,
 ) -> anyhow::Result<PostsResponse> {
     api::send_with_retries(
@@ -955,11 +1170,45 @@ async fn fetch_page(
             if window_offset > 0 {
                 builder = builder.offset(window_offset);
             }
+            if let Some(ref t) = tag {
+                builder = builder.tag(t.clone());
+            }
+            if let Some(ref t) = post_type {
+                builder = builder.post_type(t.clone());
+            }
             builder.send()
         },
         quiet,
     )
     .await
+}
+
+/// Client-side post-selection filters (`--include-tags`, `--no-reblogs`,
+/// `--only-reblogs`). Tags match case-insensitively against any listed tag,
+/// the way Tumblr itself treats tags.
+fn post_matches_filters(
+    post: &Post,
+    include_tags: &[String],
+    no_reblogs: bool,
+    only_reblogs: bool,
+) -> bool {
+    if no_reblogs && post.reblogged_from_name.is_some() {
+        return false;
+    }
+    if only_reblogs && post.reblogged_from_name.is_none() {
+        return false;
+    }
+    if !include_tags.is_empty() {
+        let matched = post.tags.iter().any(|t| {
+            include_tags
+                .iter()
+                .any(|wanted| wanted.to_lowercase() == t.to_lowercase())
+        });
+        if !matched {
+            return false;
+        }
+    }
+    true
 }
 
 /// Decides the next pagination window after a fetched batch.
@@ -1074,6 +1323,40 @@ mod tests {
             "layout": []
         });
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn filters_pass_everything_when_unset() {
+        let post = minimal_post();
+        assert!(post_matches_filters(&post, &[], false, false));
+    }
+
+    #[test]
+    fn filters_match_tags_case_insensitively() {
+        let mut post = minimal_post();
+        post.tags = vec!["Gif Art".to_owned(), "other".to_owned()];
+        assert!(post_matches_filters(
+            &post,
+            &["gif art".to_owned()],
+            false,
+            false
+        ));
+        assert!(!post_matches_filters(
+            &post,
+            &["painting".to_owned()],
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn filters_respect_reblog_flags() {
+        let mut post = minimal_post();
+        assert!(post_matches_filters(&post, &[], true, false));
+        assert!(!post_matches_filters(&post, &[], false, true));
+        post.reblogged_from_name = Some("someone".to_owned());
+        assert!(!post_matches_filters(&post, &[], true, false));
+        assert!(post_matches_filters(&post, &[], false, true));
     }
 
     #[test]

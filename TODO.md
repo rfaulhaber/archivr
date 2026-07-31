@@ -112,21 +112,79 @@ client serves everything, so no auth changes were needed.
 
 ## Phase 4 — Parity features
 
-### 14. Likes backup (--likes)
+### 14. [DONE 2026-07-31] Likes backup (--likes)
 
 README planned feature, confirmed feasible: crabrave users().likes() (authenticated user's likes, limit/offset/before/after) or blogs(id).likes() (any blog's public likes; tumblr-utils aborts on 403 when likes aren't public). Note tumblr-utils tracks incremental state for likes by liked_timestamp rather than post timestamp since like-order isn't post-ID-ordered — .archivr-state.json will need a parallel field or per-mode state.
 
-### 15. Index page generation (--index-file)
+Implementation notes (2026-07-31): went with blogs(id).likes() (works for any
+blog with public likes, and for the authenticated user's own regardless), as a
+fourth SpecialKind writing to likes/ — wholesale re-fetch per run, no
+persisted pagination state, same media/render pipeline. Research correction
+vs the sketch above: the liked_timestamp cursor plan is impossible with
+crabrave 1.1.1 — LikesResponse returns plain Posts and drops liked_timestamp
+entirely — so likes paginate by offset with the shared seen-id/no-progress
+guards and a one-post overlap stride (unlikes shrink the list under us).
+Accepted limit: Tumblr's offset pagination reaches only the most recent
+~1000 likes; a notice prints when the reported liked_count exceeds what was
+archived. Candidate crabrave upstream ask (alongside item 21's): surface
+liked_timestamp, which would enable both full-depth likes pagination and
+incremental likes state.
+
+### 15. [DONE 2026-07-31] Index page generation (--index-file)
 
 README planned feature; pure local rendering (no API needed). tumblr-utils reference: index.html plus paginated monthly archive pages, optional per-tag index (--tag-index, tag dirs keyed by digest). Building this also retires the nav-buffering scheme (see P1 buffered-post task) — navigation can live in the index instead of prev/next links on each post, which is how tumblr-utils avoids the buffering hazard entirely. Consider regenerating the index at the end of every run including --incremental/--resume, which also heals the severed nav chains at resume/incremental seams (verified finding, main.rs:371).
 
-### 16. Tag and type filtering
+Implementation notes (2026-07-31): index.rs. A persistent .archivr-index.json
+(id → timestamp/summary/tags) accumulates across runs, because incremental/
+resumed runs only see the posts they fetch and HTML post files aren't cheaply
+machine-readable; it's saved in step with the job file so an interrupt loses
+no entries for posts already on disk. index.html (single page, grouped by
+month, newest first, links to whichever special subdirs exist) is regenerated
+at the end of every successful run, before job-file deletion. Explicit
+{id}/index.html hrefs keep file:// browsing working in --directories mode.
+The per-post prev/next nav chain was kept, not retired — the index is
+additive. Known accepted limits: archives predating the flag need one full
+run to backfill the metadata; deleted posts keep their index entries
+(archival bias, consistent with files staying on disk); an unreadable
+metadata file warns and starts fresh rather than aborting.
+
+### 16. [DONE 2026-07-31] Tag and type filtering
 
 README planned --include-tags: PostsBuilder.tag(...) is server-side but single-tag; comma-separated lists need client-side filtering after fetch (tumblr-utils filters client-side too). While in there, add the unplanned cheap win --type: PostsBuilder.post_type(...) already exists (text/photo/quote/link/chat/audio/video). Also consider --no-reblog/--only-reblog via reblogged_from_name — trivial client-side.
 
-### 17. Native video/audio download (--save-video, --save-audio)
+Implementation notes (2026-07-31): --include-tags (single tag also pushed
+server-side, any-match client-side, case-insensitive, leading `#` stripped),
+--type (server-side ONLY — with NPF responses the returned `type` field reads
+"blocks", so client-side re-checking would drop everything), --no-reblogs/
+--only-reblogs (client-side via reblogged_from_name). Selection filtering is
+applied after all pagination bookkeeping (seen-ids, cursor advance, stall
+guard, --after floor), so filtered-out posts still drive the window. Filters
+persist in the job file for --resume. Incremental safety: a canonical filter
+descriptor (sorted/lowercased) is recorded in .archivr-state.json; the
+high-water floor is only read, and the state only overwritten, when
+descriptors match — a filtered one-off into a full archive leaves its state
+untouched, and --incremental with mismatched filters errors explicitly.
+Filters apply to the main window only, not drafts/queue/submissions/likes.
+
+### 17. [DONE 2026-07-31] Native video/audio download (--save-video, --save-audio)
 
 README planned feature. Native Tumblr media: reuse the images.rs pattern (collect/download/rewrite) applied to Video/Audio ContentBlock MediaObject urls — same hash-prefixed filenames, same url_map rewrite. External embeds (YouTube/Vimeo): tumblr-utils shells out to yt-dlp; offer an opt-in --save-video-external that subprocesses yt-dlp if present (pass --cookies-file through). Depends on the P2 download-concurrency rework landing first for sane throughput.
+
+Implementation notes (2026-07-31): images.rs was renamed media.rs and
+generalized — per-kind stores media/{images,videos,audio}/ behind one
+download_batch_media orchestrator (shared semaphore, depth-derived relative
+prefixes), one merged url_map, one rewrite pass covering Image/Video/Audio
+blocks. Native-media collection keys off the `media` field, which external
+embeds lack, so the split is structural rather than provider-name-based. The
+renderer now prefers a media file over embed_html for video and audio (a
+direct file outlives a provider's embed endpoint; embeds/links remain the
+fallbacks). --save-video-external shells out to yt-dlp (tokio::process,
+1h timeout, kill-on-drop, --download-archive for cross-run dedup,
+--cookies-file passed through) into media/videos/external/; a missing yt-dlp
+disables the flag with one printed notice, and per-URL failures warn and
+continue. Accepted limits: external downloads aren't linked back into the
+rendered HTML (the embed markup is kept); video poster images aren't
+downloaded.
 
 ## Phase 5 — Cheap wins and polish
 

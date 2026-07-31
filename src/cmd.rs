@@ -9,6 +9,22 @@ fn non_empty_string(s: &str) -> Result<String, String> {
     }
 }
 
+/// Normalizes one `--include-tags` entry: trims whitespace and a leading `#`
+/// (people naturally type tags the way Tumblr displays them).
+fn parse_tag(s: &str) -> Result<String, String> {
+    let tag = s.trim().trim_start_matches('#').trim();
+    if tag.is_empty() {
+        Err("tag cannot be empty".to_owned())
+    } else {
+        Ok(tag.to_owned())
+    }
+}
+
+/// Legacy post types accepted by the API's server-side `type` filter.
+const POST_TYPES: [&str; 8] = [
+    "text", "photo", "quote", "link", "chat", "audio", "video", "answer",
+];
+
 #[derive(Parser)]
 #[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
@@ -88,6 +104,63 @@ pub struct Args {
     pub submissions: bool,
 
     #[arg(
+        long,
+        help = "Also back up the blog's liked posts (the blog's likes must be public, unless it belongs to the authenticated user)"
+    )]
+    pub likes: bool,
+
+    #[arg(
+        long,
+        value_name = "TAGS",
+        value_delimiter = ',',
+        value_parser = parse_tag,
+        help = "Only back up posts carrying at least one of these tags (comma-separated)"
+    )]
+    pub include_tags: Vec<String>,
+
+    #[arg(
+        long = "type",
+        value_name = "TYPE",
+        value_parser = POST_TYPES,
+        help = "Only back up posts of this type"
+    )]
+    pub post_type: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with = "only_reblogs",
+        help = "Skip reblogs, backing up only the blog's original posts"
+    )]
+    pub no_reblogs: bool,
+
+    #[arg(long, help = "Back up only reblogs, skipping the blog's original posts")]
+    pub only_reblogs: bool,
+
+    #[arg(
+        long,
+        help = "Set to download native Tumblr video files rather than link to them"
+    )]
+    pub save_video: bool,
+
+    #[arg(
+        long,
+        help = "Set to download native Tumblr audio files rather than link to them"
+    )]
+    pub save_audio: bool,
+
+    #[arg(
+        long,
+        help = "Download externally hosted video embeds (YouTube, Vimeo, ...) with yt-dlp, if it is installed"
+    )]
+    pub save_video_external: bool,
+
+    #[arg(
+        long,
+        help = "Generate an index.html in the output directory linking all archived posts, grouped by month"
+    )]
+    pub index_file: bool,
+
+    #[arg(
         short,
         long,
         help = "Path to output posts to, defaulting to ./{blog-name}"
@@ -163,6 +236,15 @@ impl std::fmt::Debug for Args {
             .field("drafts", &self.drafts)
             .field("queue", &self.queue)
             .field("submissions", &self.submissions)
+            .field("likes", &self.likes)
+            .field("include_tags", &self.include_tags)
+            .field("post_type", &self.post_type)
+            .field("no_reblogs", &self.no_reblogs)
+            .field("only_reblogs", &self.only_reblogs)
+            .field("save_video", &self.save_video)
+            .field("save_audio", &self.save_audio)
+            .field("save_video_external", &self.save_video_external)
+            .field("index_file", &self.index_file)
             .field("output_dir", &self.output_dir)
             .field("before", &self.before)
             .field("after", &self.after)
@@ -268,6 +350,48 @@ mod tests {
         assert!(args.drafts);
         assert!(args.queue);
         assert!(args.submissions);
+    }
+
+    #[test]
+    fn include_tags_split_and_normalized() {
+        let args = Args::parse_from(["archivr", "myblog", "--include-tags", "#art, gif art ,b"]);
+        assert_eq!(args.include_tags, vec!["art", "gif art", "b"]);
+    }
+
+    #[test]
+    fn include_tags_rejects_empty_entry() {
+        let result = Args::try_parse_from(["archivr", "myblog", "--include-tags", "a,,b"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn post_type_rejects_unknown_type() {
+        assert!(Args::try_parse_from(["archivr", "myblog", "--type", "photoset"]).is_err());
+        let args = Args::parse_from(["archivr", "myblog", "--type", "video"]);
+        assert_eq!(args.post_type.as_deref(), Some("video"));
+    }
+
+    #[test]
+    fn reblog_filters_conflict() {
+        assert!(Args::try_parse_from(["archivr", "myblog", "--no-reblogs", "--only-reblogs"]).is_err());
+    }
+
+    #[test]
+    fn phase4_flags_parse() {
+        let args = Args::parse_from([
+            "archivr",
+            "myblog",
+            "--likes",
+            "--save-video",
+            "--save-audio",
+            "--save-video-external",
+            "--index-file",
+        ]);
+        assert!(args.likes);
+        assert!(args.save_video);
+        assert!(args.save_audio);
+        assert!(args.save_video_external);
+        assert!(args.index_file);
     }
 
     #[test]

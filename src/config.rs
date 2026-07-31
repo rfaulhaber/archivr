@@ -42,6 +42,15 @@ pub struct ResolvedConfig {
     pub drafts: bool,
     pub queue: bool,
     pub submissions: bool,
+    pub likes: bool,
+    pub include_tags: Vec<String>,
+    pub post_type: Option<String>,
+    pub no_reblogs: bool,
+    pub only_reblogs: bool,
+    pub save_video: bool,
+    pub save_audio: bool,
+    pub save_video_external: bool,
+    pub index_file: bool,
     pub resume: bool,
     pub incremental: bool,
     pub quiet: bool,
@@ -94,6 +103,15 @@ impl ResolvedConfig {
             drafts: args.drafts,
             queue: args.queue,
             submissions: args.submissions,
+            likes: args.likes,
+            include_tags: args.include_tags,
+            post_type: args.post_type,
+            no_reblogs: args.no_reblogs,
+            only_reblogs: args.only_reblogs,
+            save_video: args.save_video,
+            save_audio: args.save_audio,
+            save_video_external: args.save_video_external,
+            index_file: args.index_file,
             resume: args.resume,
             incremental: args.incremental,
             quiet: args.quiet,
@@ -117,7 +135,45 @@ impl ResolvedConfig {
         self.drafts = job.drafts;
         self.queue = job.queue;
         self.submissions = job.submissions;
+        self.likes = job.likes;
+        self.include_tags = job.include_tags.clone();
+        self.post_type = job.post_type.clone();
+        self.no_reblogs = job.no_reblogs;
+        self.only_reblogs = job.only_reblogs;
+        self.save_video = job.save_video;
+        self.save_audio = job.save_audio;
+        self.save_video_external = job.save_video_external;
+        self.index_file = job.index_file;
         self.template_path = job.template_path.clone();
+    }
+
+    /// Canonical description of this run's post-selection filters, or `None`
+    /// for an unfiltered run. Stored in `.archivr-state.json`: the incremental
+    /// high-water mark asserts "everything below this is archived", which only
+    /// holds between runs selecting the same set of posts.
+    pub fn filter_descriptor(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if !self.include_tags.is_empty() {
+            let mut tags: Vec<String> =
+                self.include_tags.iter().map(|t| t.to_lowercase()).collect();
+            tags.sort();
+            tags.dedup();
+            parts.push(format!("tags={}", tags.join(",")));
+        }
+        if let Some(ref t) = self.post_type {
+            parts.push(format!("type={t}"));
+        }
+        if self.no_reblogs {
+            parts.push("no-reblogs".to_owned());
+        }
+        if self.only_reblogs {
+            parts.push("only-reblogs".to_owned());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(";"))
+        }
     }
 }
 
@@ -144,6 +200,15 @@ mod tests {
             drafts: false,
             queue: false,
             submissions: false,
+            likes: false,
+            include_tags: Vec::new(),
+            post_type: None,
+            no_reblogs: false,
+            only_reblogs: false,
+            save_video: false,
+            save_audio: false,
+            save_video_external: false,
+            index_file: false,
             output_dir: Some(Utf8PathBuf::from("/tmp/test-output")),
             before: None,
             after: None,
@@ -180,6 +245,33 @@ mod tests {
         let result = ResolvedConfig::from_args(args);
         assert!(result.is_err());
         assert!(format!("{}", result.err().unwrap()).contains("Consumer secret"));
+    }
+
+    #[test]
+    fn filter_descriptor_none_when_unfiltered() {
+        let config = ResolvedConfig::from_args(base_args()).unwrap();
+        assert_eq!(config.filter_descriptor(), None);
+    }
+
+    #[test]
+    fn filter_descriptor_canonicalizes_tag_order_and_case() {
+        let mut args = base_args();
+        args.include_tags = vec!["Zebra".to_owned(), "art".to_owned()];
+        args.post_type = Some("video".to_owned());
+        args.no_reblogs = true;
+        let config = ResolvedConfig::from_args(args).unwrap();
+        assert_eq!(
+            config.filter_descriptor().as_deref(),
+            Some("tags=art,zebra;type=video;no-reblogs")
+        );
+
+        // Same filters in a different spelling produce the same descriptor.
+        let mut args2 = base_args();
+        args2.include_tags = vec!["ART".to_owned(), "zebra".to_owned()];
+        args2.post_type = Some("video".to_owned());
+        args2.no_reblogs = true;
+        let config2 = ResolvedConfig::from_args(args2).unwrap();
+        assert_eq!(config.filter_descriptor(), config2.filter_descriptor());
     }
 
     #[test]

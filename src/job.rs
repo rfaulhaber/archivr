@@ -56,6 +56,24 @@ pub struct JobState {
     #[serde(default)]
     pub submissions: bool,
     #[serde(default)]
+    pub likes: bool,
+    #[serde(default)]
+    pub include_tags: Vec<String>,
+    #[serde(default)]
+    pub post_type: Option<String>,
+    #[serde(default)]
+    pub no_reblogs: bool,
+    #[serde(default)]
+    pub only_reblogs: bool,
+    #[serde(default)]
+    pub save_video: bool,
+    #[serde(default)]
+    pub save_audio: bool,
+    #[serde(default)]
+    pub save_video_external: bool,
+    #[serde(default)]
+    pub index_file: bool,
+    #[serde(default)]
     pub template_path: Option<Utf8PathBuf>,
 }
 
@@ -79,6 +97,15 @@ impl JobState {
             drafts: config.drafts,
             queue: config.queue,
             submissions: config.submissions,
+            likes: config.likes,
+            include_tags: config.include_tags.clone(),
+            post_type: config.post_type.clone(),
+            no_reblogs: config.no_reblogs,
+            only_reblogs: config.only_reblogs,
+            save_video: config.save_video,
+            save_audio: config.save_audio,
+            save_video_external: config.save_video_external,
+            index_file: config.index_file,
             template_path: config.template_path.clone(),
         }
     }
@@ -129,6 +156,15 @@ mod tests {
             drafts: true,
             queue: false,
             submissions: false,
+            likes: true,
+            include_tags: vec!["art".to_owned()],
+            post_type: Some("video".to_owned()),
+            no_reblogs: true,
+            only_reblogs: false,
+            save_video: true,
+            save_audio: false,
+            save_video_external: false,
+            index_file: true,
             template_path: Some(Utf8PathBuf::from("my-template.html")),
         }
     }
@@ -158,6 +194,15 @@ mod tests {
         assert!(deserialized.drafts);
         assert!(!deserialized.queue);
         assert!(!deserialized.submissions);
+        assert!(deserialized.likes);
+        assert_eq!(deserialized.include_tags, vec!["art"]);
+        assert_eq!(deserialized.post_type.as_deref(), Some("video"));
+        assert!(deserialized.no_reblogs);
+        assert!(!deserialized.only_reblogs);
+        assert!(deserialized.save_video);
+        assert!(!deserialized.save_audio);
+        assert!(!deserialized.save_video_external);
+        assert!(deserialized.index_file);
         assert_eq!(
             deserialized.template_path,
             Some(Utf8PathBuf::from("my-template.html"))
@@ -185,6 +230,15 @@ mod tests {
         assert!(!job.drafts);
         assert!(!job.queue);
         assert!(!job.submissions);
+        assert!(!job.likes);
+        assert!(job.include_tags.is_empty());
+        assert_eq!(job.post_type, None);
+        assert!(!job.no_reblogs);
+        assert!(!job.only_reblogs);
+        assert!(!job.save_video);
+        assert!(!job.save_audio);
+        assert!(!job.save_video_external);
+        assert!(!job.index_file);
         assert_eq!(job.template_path, None);
     }
 

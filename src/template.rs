@@ -271,7 +271,7 @@ fn is_hex_color(s: &str) -> bool {
 /// NPF text/link/poll fields are plain text, so they must be escaped before being
 /// interpolated into the HTML we build by hand (minijinja's auto-escaping only
 /// covers `{{ ... }}` template expressions, not strings assembled in Rust).
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -711,17 +711,19 @@ fn render_block_from_value(block: &Value) -> String {
         }
         "video" => {
             let mut html = String::from(r#"<div class="content-block video-embed">"#);
-            if let Ok(embed) = block.get_attr("embed_html")
-                && let Some(embed_str) = embed.as_str()
+            // A native media file outranks provider embed markup: a local
+            // (or at least direct) video file keeps playing after the
+            // provider's embed endpoint dies, which is the point of an
+            // archive.
+            let media_len = block
+                .get_attr("media")
+                .ok()
+                .and_then(|m| m.len())
+                .unwrap_or(0);
+            if media_len > 0
+                && let Ok(media) = block.get_attr("media")
             {
-                html.push_str(embed_str);
-                html.push_str("</div>");
-                return html;
-            }
-            if let Ok(media) = block.get_attr("media")
-                && let Some(len) = media.len()
-            {
-                for i in 0..len {
+                for i in 0..media_len {
                     if let Ok(m) = media.get_item(&Value::from(i)) {
                         let url = m
                             .get_attr("url")
@@ -740,6 +742,10 @@ fn render_block_from_value(block: &Value) -> String {
                         ));
                     }
                 }
+            } else if let Ok(embed) = block.get_attr("embed_html")
+                && let Some(embed_str) = embed.as_str()
+            {
+                html.push_str(embed_str);
             } else if let Ok(url) = block.get_attr("url")
                 && let Some(url_str) = url.as_str()
             {
@@ -790,17 +796,17 @@ fn render_block_from_value(block: &Value) -> String {
                 html.push_str("</div>");
             }
 
-            if let Ok(embed) = block.get_attr("embed_html")
-                && let Some(embed_str) = embed.as_str()
+            // As with video: a direct audio file outlives provider embed
+            // markup, so it renders first.
+            let media_len = block
+                .get_attr("media")
+                .ok()
+                .and_then(|m| m.len())
+                .unwrap_or(0);
+            if media_len > 0
+                && let Ok(media) = block.get_attr("media")
             {
-                html.push_str(embed_str);
-                html.push_str("</div>");
-                return html;
-            }
-            if let Ok(media) = block.get_attr("media")
-                && let Some(len) = media.len()
-            {
-                for i in 0..len {
+                for i in 0..media_len {
                     if let Ok(m) = media.get_item(&Value::from(i)) {
                         let url = m
                             .get_attr("url")
@@ -813,6 +819,10 @@ fn render_block_from_value(block: &Value) -> String {
                         ));
                     }
                 }
+            } else if let Ok(embed) = block.get_attr("embed_html")
+                && let Some(embed_str) = embed.as_str()
+            {
+                html.push_str(embed_str);
             } else if let Ok(url) = block.get_attr("url")
                 && let Some(url_str) = url.as_str()
             {

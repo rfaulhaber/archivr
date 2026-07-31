@@ -66,6 +66,15 @@ This will kick off a job to back up an entire blog.
 | `--drafts`          |       | Also back up the blog's drafts (blog must belong to the authenticated user)        |
 | `--queue`           |       | Also back up the blog's queued posts (blog must belong to the authenticated user)  |
 | `--submissions`     |       | Also back up the blog's submissions (blog must belong to the authenticated user)   |
+| `--likes`           |       | Also back up the blog's liked posts (likes must be public, or the blog yours)      |
+| `--include-tags`    |       | Only back up posts carrying at least one of these comma-separated tags             |
+| `--type`            |       | Only back up posts of this type (`text`, `photo`, `quote`, `link`, `chat`, `audio`, `video`, `answer`) |
+| `--no-reblogs`      |       | Skip reblogs, backing up only original posts                                       |
+| `--only-reblogs`    |       | Back up only reblogs                                                               |
+| `--save-video`      |       | Download native Tumblr video files locally instead of linking to CDN               |
+| `--save-audio`      |       | Download native Tumblr audio files locally instead of linking to CDN               |
+| `--save-video-external` |   | Download external video embeds (YouTube, Vimeo, ...) with `yt-dlp`, if installed   |
+| `--index-file`      |       | Generate an `index.html` linking all archived posts, grouped by month              |
 | `--before`          |       | Only fetch posts before this date (Unix timestamp or RFC3339)                      |
 | `--after`           |       | Only fetch posts after this date (Unix timestamp or RFC3339)                       |
 | `--resume`          |       | Resume a previously interrupted backup                                             |
@@ -131,6 +140,30 @@ archivr my-blog --consumer-key KEY --consumer-secret SECRET --drafts --queue --s
 Each flag adds a collection to the normal backup, written to its own subdirectory of the output dir (`drafts/`, `queue/`, `submissions/`) in the same format (HTML or `--json`) as the rest of the archive. The blog must belong to the authenticated account — Tumblr rejects these requests for blogs you don't own.
 
 These collections are small and change freely between runs (queued posts leave the queue when published), so they're re-fetched in full on every run, including `--incremental` ones. Files for posts that have since been deleted or published stay on disk.
+
+### Likes
+
+`--likes` adds the blog's liked posts to the backup, written to a `likes/` subdirectory the same way as the collections above. Any blog's likes can be backed up as long as they're shared publicly; for your own blog they work regardless of that setting.
+
+Tumblr's API only exposes the most recent likes (roughly the last 1000) through this endpoint. When the blog reports more likes than were reachable, archivr prints a notice with both numbers.
+
+### Filtering
+
+`--include-tags art,gif` backs up only posts carrying at least one of the listed tags (case-insensitive). A single tag is filtered server-side, saving API quota; longer lists are filtered client-side after fetching. `--type video` restricts the backup to one post type, and `--no-reblogs` / `--only-reblogs` split original posts from reblogs.
+
+Filters combine with `--incremental`, but the state file records which filters a backup ran with, and the incremental baseline is only trusted between runs using the same filters — mixing filtered and unfiltered runs in one output directory would otherwise leave silent gaps. A one-off filtered run into an existing archive leaves the archive's incremental state untouched.
+
+### Video and audio
+
+`--save-video` and `--save-audio` download posts' native Tumblr media files into the shared `media/videos/` and `media/audio/` stores, rewriting the archived HTML/JSON to point at the local copies — the same treatment `--save-images` gives images.
+
+Externally hosted embeds (YouTube, Vimeo, ...) can't be fetched directly. With `--save-video-external`, archivr hands their URLs to [yt-dlp](https://github.com/yt-dlp/yt-dlp) (if installed) and stores the results under `media/videos/external/`, deduplicated across runs. These files are kept alongside the archive; the post HTML keeps the original embed. A `--cookies-file` is passed through to yt-dlp for embeds that need authentication.
+
+### Index page
+
+`--index-file` generates an `index.html` at the archive root listing every archived post, grouped by month with dates, titles, and tags, plus links to any special-collection subdirectories. The index is regenerated at the end of every run — including `--incremental` and `--resume` ones — from a persistent `.archivr-index.json` metadata file that accumulates across runs.
+
+For archives created before this flag existed, run one full (non-incremental) backup with `--index-file` to populate the metadata.
 
 ### Job config file
 
@@ -301,7 +334,8 @@ You can also selectively override rendering for specific block types:
 
 The following features are not yet implemented but are planned for future releases:
 
-- Video and audio downloading (`--save-video`, `--save-audio`)
-- Liked posts backup (`--likes`)
-- Tag filtering (`--include-tags`)
-- Index page generation (`--index-file`)
+- `--count` / `--skip` and progress display ("N / total posts")
+- Distinct exit codes for scripting
+- Multiple blog names per invocation
+- Avatar backup, post-file mtimes matching post dates, `--media-list` export
+- Internet Archive fallback for dead media URLs

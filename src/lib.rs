@@ -3,14 +3,16 @@ pub mod auth;
 pub mod cmd;
 pub mod config;
 pub mod fsutil;
-pub mod images;
+pub mod index;
 pub mod job;
+pub mod media;
 pub mod notes;
 pub mod state;
 pub mod template;
 
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
+pub use index::ArchiveIndex;
 pub use job::JobState;
 pub use notes::PostNotes;
 pub use state::BackupState;

@@ -13,6 +13,14 @@ pub struct BackupState {
     pub blog_name: String,
     pub last_run_at: PostTimestamp,
     pub newest_post_timestamp: PostTimestamp,
+    /// Canonical descriptor of the post-selection filters the recorded backup
+    /// ran with ([`crate::ResolvedConfig::filter_descriptor`]), `None` for an
+    /// unfiltered backup. The high-water mark is only meaningful between runs
+    /// selecting the same posts, so mismatching runs neither read nor advance
+    /// it. Absent in state files from pre-filter archivr versions, which were
+    /// always unfiltered.
+    #[serde(default)]
+    pub filters: Option<String>,
 }
 
 impl BackupState {
@@ -43,7 +51,15 @@ mod tests {
             blog_name: "test-blog".to_owned(),
             last_run_at: 1_700_000_500,
             newest_post_timestamp: 1_700_000_000,
+            filters: Some("tags=art".to_owned()),
         }
+    }
+
+    #[test]
+    fn legacy_state_file_defaults_to_unfiltered() {
+        let json = r#"{"blog_name":"b","last_run_at":1,"newest_post_timestamp":2}"#;
+        let state: BackupState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.filters, None);
     }
 
     #[test]
@@ -54,6 +70,7 @@ mod tests {
         assert_eq!(deserialized.blog_name, "test-blog");
         assert_eq!(deserialized.last_run_at, 1_700_000_500);
         assert_eq!(deserialized.newest_post_timestamp, 1_700_000_000);
+        assert_eq!(deserialized.filters.as_deref(), Some("tags=art"));
     }
 
     #[test]
