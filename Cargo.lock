@@ -319,9 +319,9 @@ dependencies = [
 
 [[package]]
 name = "crabrave"
-version = "1.1.1"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "864cf14945aeb2b1b559a65b9cd61a69c9a90b56742dddf6ac44fb230e8f46f3"
+checksum = "6a50ded06894a805dc914ab10616e35b096a413f3e4f57116b8b318d3dd2bc9e"
 dependencies = [
  "camino",
  "fs-err",
@@ -472,7 +472,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

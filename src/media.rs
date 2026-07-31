@@ -83,9 +83,9 @@ pub fn collect_video_urls(post: &Post) -> Vec<String> {
     for_all_blocks(post, |blocks| {
         for block in blocks {
             if let ContentBlock::Video { media: Some(media), .. } = block
-                && let Some(m) = media.iter().find(|m| !m.url.is_empty())
+                && !media.url.is_empty()
             {
-                urls.push(m.url.clone());
+                urls.push(media.url.clone());
             }
         }
     });
@@ -114,7 +114,7 @@ pub fn collect_external_video_urls(post: &Post) -> Vec<String> {
     for_all_blocks(post, |blocks| {
         for block in blocks {
             if let ContentBlock::Video { media, url: Some(url), .. } = block
-                && media.as_ref().is_none_or(|m| m.is_empty())
+                && media.as_ref().is_none_or(|m| m.url.is_empty())
                 && !url.is_empty()
             {
                 urls.push(url.clone());
@@ -428,10 +428,8 @@ pub fn rewrite_post_media_urls<'a>(
 fn block_media_urls(block: &ContentBlock) -> Box<dyn Iterator<Item = &str> + '_> {
     match block {
         ContentBlock::Image { media, .. } => Box::new(media.iter().map(|m| m.url.as_str())),
-        ContentBlock::Video { media: Some(media), .. } => {
-            Box::new(media.iter().map(|m| m.url.as_str()))
-        }
-        ContentBlock::Audio { media: Some(media), .. } => {
+        ContentBlock::Video { media: Some(media), .. }
+        | ContentBlock::Audio { media: Some(media), .. } => {
             Box::new(std::iter::once(media.url.as_str()))
         }
         _ => Box::new(std::iter::empty()),
@@ -455,12 +453,8 @@ fn rewrite_blocks(blocks: &mut [ContentBlock], url_map: &HashMap<String, String>
                     rewrite_media_object(media_obj, url_map);
                 }
             }
-            ContentBlock::Video { media: Some(media), .. } => {
-                for media_obj in media {
-                    rewrite_media_object(media_obj, url_map);
-                }
-            }
-            ContentBlock::Audio { media: Some(media), .. } => {
+            ContentBlock::Video { media: Some(media), .. }
+            | ContentBlock::Audio { media: Some(media), .. } => {
                 rewrite_media_object(media, url_map);
             }
             _ => {}
@@ -720,6 +714,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -738,6 +735,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -755,6 +755,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -770,6 +773,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             content_raw: None,
             layout: vec![],
@@ -791,6 +797,7 @@ mod tests {
                 text: "hello".to_owned(),
                 subtype: None,
                 formatting: None,
+                indent_level: None,
             }],
             vec![],
         );
@@ -833,6 +840,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -849,6 +859,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -878,7 +891,7 @@ mod tests {
         let native = video_block(serde_json::json!({
             "type": "video",
             "provider": "tumblr",
-            "media": [{ "url": "https://vt.tumblr.com/clip.mp4" }]
+            "media": { "url": "https://vt.tumblr.com/clip.mp4" }
         }));
         let external = video_block(serde_json::json!({
             "type": "video",
@@ -918,6 +931,9 @@ mod tests {
                 alt_text: None,
                 caption: None,
                 attribution: None,
+                colors: None,
+                feedback_token: None,
+                poster: None,
             }],
             vec![],
         );
@@ -963,7 +979,7 @@ mod tests {
     fn rewrite_covers_video_and_audio_blocks() {
         let video = video_block(serde_json::json!({
             "type": "video",
-            "media": [{ "url": "https://vt.tumblr.com/clip.mp4" }]
+            "media": { "url": "https://vt.tumblr.com/clip.mp4" }
         }));
         let audio = video_block(serde_json::json!({
             "type": "audio",
@@ -985,7 +1001,7 @@ mod tests {
         assert!(matches!(result, Cow::Owned(_)));
         match &result.content[0] {
             ContentBlock::Video { media: Some(m), .. } => {
-                assert_eq!(m[0].url, "media/videos/local.mp4");
+                assert_eq!(m.url, "media/videos/local.mp4");
             }
             _ => panic!("expected Video block"),
         }

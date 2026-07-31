@@ -5,7 +5,7 @@
 //! shared retry/rate-limit policy from [`crate::api`].
 
 use crabrave::Crabrave;
-use crabrave::handlers::blog::{Note, NoteMode, NotesResponse};
+use crabrave::handlers::blog::{Note, NoteMode, NotesResponse, RollupNoteGroup};
 use serde::Serialize;
 
 use crate::api;
@@ -24,21 +24,25 @@ pub struct PostNotes {
     /// `--notes-limit` truncates the fetch.
     pub total_notes: u64,
     pub notes: Vec<Note>,
-    /// Aggregated notes Tumblr excludes from the primary list.
-    pub rollup_notes: Vec<Note>,
+    /// Aggregated note groups Tumblr excludes from the primary list, each
+    /// carrying its own totals and a sample of the collapsed notes.
+    pub rollup_notes: Vec<RollupNoteGroup>,
 }
 
 /// Decides the next `before_timestamp` cursor from a notes response, or
 /// `None` when pagination is done. The cursor must strictly decrease so a
-/// misbehaving server cannot loop the fetch forever.
+/// misbehaving server cannot loop the fetch forever; the API serves it as a
+/// string, and one that doesn't parse as a timestamp ends pagination too.
 fn next_cursor(current: Option<i64>, response: &NotesResponse) -> Option<i64> {
-    let next = response
+    let next: i64 = response
         .links
         .as_ref()?
         .next
         .as_ref()?
         .query_params
-        .before_timestamp;
+        .before_timestamp
+        .parse()
+        .ok()?;
     match current {
         Some(cur) if next >= cur => None,
         _ => Some(next),
@@ -154,5 +158,33 @@ mod tests {
         let resp = response_with_cursor(Some(500));
         assert_eq!(next_cursor(Some(500), &resp), None);
         assert_eq!(next_cursor(Some(400), &resp), None);
+    }
+
+    fn response_with_raw_cursor(before_timestamp: serde_json::Value) -> NotesResponse {
+        serde_json::from_value(serde_json::json!({
+            "notes": [],
+            "total_notes": 0,
+            "_links": {
+                "next": {
+                    "href": "/v2/blog/x/notes",
+                    "query_params": { "id": "1", "before_timestamp": before_timestamp }
+                }
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn next_cursor_parses_string_cursor() {
+        // The live API quotes the cursor: "500", not 500.
+        let resp = response_with_raw_cursor(serde_json::json!("500"));
+        assert_eq!(next_cursor(None, &resp), Some(500));
+        assert_eq!(next_cursor(Some(600), &resp), Some(500));
+    }
+
+    #[test]
+    fn next_cursor_stops_on_unparseable_cursor() {
+        let resp = response_with_raw_cursor(serde_json::json!("not-a-timestamp"));
+        assert_eq!(next_cursor(None, &resp), None);
     }
 }

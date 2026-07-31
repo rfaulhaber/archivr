@@ -120,12 +120,17 @@ pub const DEFAULT_TEMPLATE: &str = r##"<!DOCTYPE html>
           {%- if note.date %} <span class="note-date">&middot; {{ note.date }}</span>{% endif %}
         </li>
         {%- endfor %}
-        {%- for note in notes.rollup_notes %}
+        {%- for group in notes.rollup_notes %}
+        {%- for note in group.notes %}
         <li class="note rollup">
           {%- if note.blog_url %}<a href="{{ note.blog_url | safe_url }}">{{ note.blog_name }}</a>{%- else %}{{ note.blog_name }}{%- endif %}
           {{ note.note_type }}
           {%- if note.date %} <span class="note-date">&middot; {{ note.date }}</span>{% endif %}
         </li>
+        {%- endfor %}
+        {%- if group.total_notes > (group.notes | length) %}
+        <li class="note rollup">&hellip; {{ group.total_notes - (group.notes | length) }} more collapsed notes</li>
+        {%- endif %}
         {%- endfor %}
       </ol>
     </details>
@@ -360,6 +365,7 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
             text,
             subtype,
             formatting,
+            indent_level,
         } => {
             let formatting = formatting.as_deref().unwrap_or(&[]);
             context! {
@@ -368,6 +374,7 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
                 // Pre-rendered, formatting-aware HTML (already escaped + wrapped).
                 text_html => render_formatted_text(text, formatting),
                 subtype => subtype,
+                indent_level => indent_level,
             }
         }
         ContentBlock::Image {
@@ -405,19 +412,17 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
             duration,
             ..
         } => {
+            // Wrap in a list so the renderer's list-indexing logic finds it,
+            // matching how audio media is emitted.
             let media_values: Vec<Value> = media
                 .as_ref()
                 .map(|m| {
-                    m.iter()
-                        .map(|media_obj| {
-                            context! {
-                                url => media_obj.url,
-                                width => media_obj.width,
-                                height => media_obj.height,
-                                media_type => media_obj.media_type,
-                            }
-                        })
-                        .collect()
+                    vec![context! {
+                        url => m.url,
+                        width => m.width,
+                        height => m.height,
+                        media_type => m.media_type,
+                    }]
                 })
                 .unwrap_or_default();
             context! {
@@ -515,7 +520,7 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
                 timestamp => timestamp,
             }
         }
-        ContentBlock::Unknown | _ => {
+        _ => {
             context! {
                 type => "unknown",
             }
@@ -547,7 +552,19 @@ fn note_to_value(note: &Note) -> Value {
 /// Converts a post's captured notes to a minijinja Value
 fn notes_to_value(notes: &PostNotes) -> Value {
     let note_values: Vec<Value> = notes.notes.iter().map(note_to_value).collect();
-    let rollup_values: Vec<Value> = notes.rollup_notes.iter().map(note_to_value).collect();
+    let rollup_values: Vec<Value> = notes
+        .rollup_notes
+        .iter()
+        .map(|group| {
+            let group_notes: Vec<Value> = group.notes.iter().map(note_to_value).collect();
+            context! {
+                notes => group_notes,
+                total_notes => group.total_notes,
+                total_likes => group.total_likes,
+                total_reblogs => group.total_reblogs,
+            }
+        })
+        .collect();
     context! {
         total => notes.total_notes,
         notes => note_values,
@@ -1026,6 +1043,7 @@ mod tests {
             text: "<script>alert('xss')</script>".to_string(),
             subtype: None,
             formatting: None,
+            indent_level: None,
         }];
 
         let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();
@@ -1096,6 +1114,7 @@ mod tests {
             text: text.to_owned(),
             subtype: None,
             formatting: Some(formatting),
+            indent_level: None,
         }];
         post
     }
@@ -1257,6 +1276,7 @@ mod tests {
             text: "A heading".to_string(),
             subtype: Some("heading1".to_string()),
             formatting: None,
+            indent_level: None,
         }];
 
         let html = PostRenderer::new().unwrap().render(&post, None, None).unwrap();

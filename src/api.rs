@@ -136,10 +136,11 @@ fn is_transient(e: &CrabError) -> bool {
         CrabError::Http(_) | CrabError::HttpClient(_) => true,
         // `status` here comes from Tumblr's JSON error envelope.
         CrabError::Api { status, .. } => matches!(*status, 500 | 502 | 503 | 504),
-        // Gateway error pages (a proxy's raw 502/503 HTML) aren't JSON, so
-        // they surface as parse failures; treating those as transient costs a
-        // genuine schema break only three quick retries before the same error
-        // is returned.
+        // Non-JSON bodies on an error status surface as `Api { status }`, so
+        // parse failures here mean a 2xx response that wasn't the expected
+        // envelope (a WAF interstitial served with 200, a truncated body);
+        // treating those as transient costs a genuine schema break only three
+        // quick retries before the same error is returned.
         CrabError::Serialization(_) => true,
         _ => false,
     }
@@ -175,6 +176,7 @@ mod tests {
         anyhow::Error::new(CrabError::Api {
             status,
             message: "test".to_owned(),
+            errors: Vec::new(),
         })
     }
 
