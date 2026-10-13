@@ -34,8 +34,8 @@ All Rust sources live under `src/`:
 - `src/lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `src/cmd.rs` - CLI argument definitions using clap derive (manual `Debug` impl redacts OAuth credentials)
 - `src/config.rs` - Configuration file deserialization and CLI args resolution into one `ResolvedConfig` per requested blog
-- `src/auth.rs` - Authentication: token storage, expiry checking, refresh-on-expiry, CSRF verification, interactive OAuth flow
-- `src/api.rs` - Shared request policy: per-request timeout, transient-error retries, rate-limit sleeps (`send_with_retries`), error classification for exit codes, stdout/stderr writers (`say`/`say_error` — the sanctioned alternative to the denied `println!`/`eprintln!`)
+- `src/auth.rs` - Authentication: token storage, expiry checking, CSRF verification, interactive OAuth flow, and `Session` (the shared, renewable credential/client handle every API call goes through; tokens are refreshed mid-run, since a rate-limit sleep can outlive one)
+- `src/api.rs` - Shared request policy: per-request timeout, transient-error retries, rate-limit sleeps, token renewal on expiry or 401 (`send_with_retries` over a `ClientSource`), error classification for exit codes, stdout/stderr writers (`say`/`say_error` — the sanctioned alternative to the denied `println!`/`eprintln!`)
 - `src/job.rs` - `JobState` (in-progress backup pagination cursor and persisted job parameters for `--resume`)
 - `src/state.rs` - `BackupState` (`.archivr-state.json`: incremental high-water mark plus the filter descriptor it was recorded under)
 - `src/media.rs` - Media collection/download/URL-rewriting into the shared `media/{images,videos,audio}/` stores, Wayback Machine fallback, the yt-dlp bridge for external embeds, `media-list.jsonl` writer

@@ -16,7 +16,7 @@ use archivr::{
     template::{OLDER_NAV_PLACEHOLDER, build_older_nav_link},
 };
 use clap::Parser;
-use crabrave::Crabrave;
+use archivr::auth::Session;
 use crabrave::handlers::blog::{AvatarResponse, Post, PostsResponse};
 use tokio::sync::Semaphore;
 
@@ -100,7 +100,7 @@ async fn run(args: Args) -> anyhow::Result<u64> {
     let first = configs
         .first()
         .ok_or_else(|| anyhow::anyhow!("no blog names given"))?;
-    let client = authenticate(
+    let session = authenticate(
         &first.consumer_key,
         &first.consumer_secret,
         data_dir,
@@ -117,7 +117,7 @@ async fn run(args: Args) -> anyhow::Result<u64> {
 
     for config in configs {
         let blog_name = config.blog_name.clone();
-        match backup_blog(&client, config).await {
+        match backup_blog(&session, config).await {
             Ok(archived) => total_archived += archived,
             Err(e) if multiple => {
                 api::say_error(format_args!("Backing up {blog_name} failed: {e:#}"))?;
@@ -143,7 +143,7 @@ async fn run(args: Args) -> anyhow::Result<u64> {
 
 /// Backs up one blog into its output directory, returning how many items
 /// (posts plus special-collection entries) this invocation archived.
-async fn backup_blog(client: &Crabrave, mut config: ResolvedConfig) -> anyhow::Result<u64> {
+async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::Result<u64> {
     if !fs_err::exists(&config.output_dir)? {
         fs_err::create_dir_all(&config.output_dir)?;
     }
@@ -414,7 +414,7 @@ async fn backup_blog(client: &Crabrave, mut config: ResolvedConfig) -> anyhow::R
     };
 
     if config.save_avatar {
-        backup_avatar(client, &config).await;
+        backup_avatar(session, &config).await;
     }
 
     let mut sinks = OutputSinks {
@@ -427,9 +427,9 @@ async fn backup_blog(client: &Crabrave, mut config: ResolvedConfig) -> anyhow::R
     let mut total_archived: u64;
 
     if !config.post_ids.is_empty() {
-        total_archived = run_single_posts(client, &config, &mut sinks).await?;
+        total_archived = run_single_posts(session, &config, &mut sinks).await?;
     } else {
-        let outcome = run_backup(client, &config, &mut sinks, &mut job, &job_file).await?;
+        let outcome = run_backup(session, &config, &mut sinks, &mut job, &job_file).await?;
         total_archived = outcome.archived;
         save_backup_state(&config, &state_file, prior_state.as_ref(), outcome.newest_observed)?;
     }
@@ -439,7 +439,7 @@ async fn backup_blog(client: &Crabrave, mut config: ResolvedConfig) -> anyhow::R
     // window quickly and re-runs the specials wholesale.
     for kind in SpecialKind::ALL {
         if kind.enabled(&config) {
-            total_archived += backup_special(client, &config, &mut sinks, kind).await?;
+            total_archived += backup_special(session, &config, &mut sinks, kind).await?;
         }
     }
 
@@ -653,7 +653,7 @@ struct OutputSinks<'a> {
 }
 
 async fn run_backup(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
     sinks: &mut OutputSinks<'_>,
     job: &mut JobState,
@@ -719,7 +719,7 @@ async fn run_backup(
     let mut window_offset: u64 = job.window_offset;
 
     let loop_result: anyhow::Result<()> = async {
-        let mut pending_fetch = Some(spawn_fetch(client, config, cursor, window_offset));
+        let mut pending_fetch = Some(spawn_fetch(session, config, cursor, window_offset));
         loop {
             let Some(fetch) = pending_fetch.take() else {
                 break;
@@ -784,7 +784,7 @@ async fn run_backup(
             // Start fetching the next page now, so the API round-trip runs
             // concurrently with this batch's downloads and rendering.
             if !reached_floor {
-                pending_fetch = Some(spawn_fetch(client, config, next_cursor, next_window_offset));
+                pending_fetch = Some(spawn_fetch(session, config, next_cursor, next_window_offset));
             }
 
             // Post-selection filters. A single `--include-tags` tag is also
@@ -812,7 +812,7 @@ async fn run_backup(
             // rendering, so single-file posts no longer serialize downloads.
             let url_map: HashMap<String, String> = if media_selection.any() {
                 download_batch_media(
-                    client.client(),
+                    &session.http_client(),
                     &selected,
                     &config.output_dir,
                     media_depth,
@@ -842,7 +842,7 @@ async fn run_backup(
                 log::info!("processing post {}", post.id);
 
                 let post_notes = if config.save_notes {
-                    fetch_notes_for_post(client, config, post).await?
+                    fetch_notes_for_post(session, config, post).await?
                 } else {
                     None
                 };
@@ -1019,7 +1019,7 @@ async fn run_backup(
 /// prev/next chain doesn't apply to an arbitrary selection, so each file's
 /// older slot is closed immediately.
 async fn run_single_posts(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
     sinks: &mut OutputSinks<'_>,
 ) -> anyhow::Result<u64> {
@@ -1042,7 +1042,8 @@ async fn run_single_posts(
         }
 
         let fetched = api::send_with_retries(
-            || client.blogs(config.blog_name.clone()).post(id.clone()).get(),
+            session,
+            |client| client.blogs(config.blog_name.clone()).post(id.clone()).get(),
             config.quiet,
         )
         .await;
@@ -1057,14 +1058,14 @@ async fn run_single_posts(
         ensure_numeric_id(&post.id)?;
 
         let post_notes = if config.save_notes {
-            fetch_notes_for_post(client, config, &post).await?
+            fetch_notes_for_post(session, config, &post).await?
         } else {
             None
         };
 
         let url_map: HashMap<String, String> = if media_selection.any() {
             download_batch_media(
-                client.client(),
+                &session.http_client(),
                 &[&post],
                 &config.output_dir,
                 media_depth,
@@ -1124,8 +1125,8 @@ async fn run_single_posts(
 /// Downloads the blog's avatar into the output directory (`--save-avatar`).
 /// Best-effort: an avatar failure warns rather than aborting a possibly
 /// hours-long backup.
-async fn backup_avatar(client: &Crabrave, config: &ResolvedConfig) {
-    match fetch_avatar(client, config).await {
+async fn backup_avatar(session: &Session, config: &ResolvedConfig) {
+    match fetch_avatar(session, config).await {
         Ok(dest) => {
             if !config.quiet {
                 let _ = say!("Saved avatar to {dest}");
@@ -1140,11 +1141,12 @@ async fn backup_avatar(client: &Crabrave, config: &ResolvedConfig) {
 }
 
 async fn fetch_avatar(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
 ) -> anyhow::Result<camino::Utf8PathBuf> {
     let response = api::send_with_retries(
-        || {
+        session,
+        |client| {
             let blogs = client.blogs(config.blog_name.clone());
             async move { blogs.avatar(Some(AVATAR_SIZE)).await }
         },
@@ -1154,8 +1156,8 @@ async fn fetch_avatar(
     let bytes = match response {
         AvatarResponse::ImageData(data) => data,
         AvatarResponse::ImageUrl { avatar_url } => {
-            let response = client
-                .client()
+            let response = session
+                .http_client()
                 .get(&avatar_url)
                 .timeout(api::REQUEST_TIMEOUT)
                 .send()
@@ -1206,7 +1208,7 @@ fn render_json(post: &Post, notes: Option<&PostNotes>) -> anyhow::Result<String>
 /// without notes, and the failure is printed — while rate-limit or retry
 /// exhaustion still aborts the run so --resume can pick it up.
 async fn fetch_notes_for_post(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
     post: &Post,
 ) -> anyhow::Result<Option<PostNotes>> {
@@ -1214,7 +1216,7 @@ async fn fetch_notes_for_post(
         return Ok(Some(PostNotes::default()));
     }
     match fetch_post_notes(
-        client,
+        session,
         &config.blog_name,
         &post.id,
         config.notes_limit,
@@ -1298,7 +1300,7 @@ impl SpecialKind {
 /// the endpoint reports one, the collection's server-side total. Drafts
 /// paginate by `before_id`; queue, submissions, and likes by offset.
 async fn fetch_special_page(
-    client: &Crabrave,
+    session: &Session,
     blog_name: &str,
     kind: SpecialKind,
     before_id: Option<&str>,
@@ -1307,7 +1309,8 @@ async fn fetch_special_page(
 ) -> anyhow::Result<(Vec<Post>, Option<u64>)> {
     match kind {
         SpecialKind::Drafts => api::send_with_retries(
-            || {
+            session,
+            |client| {
                 let mut builder = client.blogs(blog_name.to_owned()).drafts();
                 if let Some(id) = before_id {
                     builder = builder.before_id(id.to_owned());
@@ -1319,7 +1322,8 @@ async fn fetch_special_page(
         .await
         .map(|r| (r.posts, None)),
         SpecialKind::Queue => api::send_with_retries(
-            || {
+            session,
+            |client| {
                 let mut builder = client.blogs(blog_name.to_owned()).queue();
                 if offset > 0 {
                     builder = builder.offset(offset);
@@ -1331,7 +1335,8 @@ async fn fetch_special_page(
         .await
         .map(|r| (r.posts, None)),
         SpecialKind::Submissions => api::send_with_retries(
-            || {
+            session,
+            |client| {
                 let mut builder = client.blogs(blog_name.to_owned()).submissions();
                 if offset > 0 {
                     builder = builder.offset(offset);
@@ -1343,7 +1348,8 @@ async fn fetch_special_page(
         .await
         .map(|r| (r.posts, None)),
         SpecialKind::Likes => api::send_with_retries(
-            || {
+            session,
+            |client| {
                 let mut builder = client.blogs(blog_name.to_owned()).likes();
                 if offset > 0 {
                     builder = builder.offset(offset);
@@ -1363,7 +1369,7 @@ async fn fetch_special_page(
 /// state is persisted: every run re-fetches the whole collection and
 /// rewrites its files, meaning an interrupt here costs nothing on --resume.
 async fn backup_special(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
     sinks: &mut OutputSinks<'_>,
     kind: SpecialKind,
@@ -1397,7 +1403,7 @@ async fn backup_special(
 
     loop {
         let (posts, total) = fetch_special_page(
-            client,
+            session,
             &config.blog_name,
             kind,
             before_id.as_deref(),
@@ -1420,7 +1426,7 @@ async fn backup_special(
 
         let url_map: HashMap<String, String> = if media_selection.any() {
             download_batch_media(
-                client.client(),
+                &session.http_client(),
                 &new_posts,
                 &config.output_dir,
                 media_depth,
@@ -1531,12 +1537,12 @@ const MAX_STALLED_PAGES: u32 = 3;
 /// Fetches a page on a separate task so the API round-trip (including any
 /// rate-limit sleep) overlaps with processing of the previous batch.
 fn spawn_fetch(
-    client: &Crabrave,
+    session: &Session,
     config: &ResolvedConfig,
     cursor: PostTimestamp,
     window_offset: u64,
 ) -> tokio::task::JoinHandle<anyhow::Result<PostsResponse>> {
-    let client = client.clone();
+    let session = session.clone();
     let blog_name = config.blog_name.clone();
     let quiet = config.quiet;
     // The API's `tag` param takes a single tag, so only a one-tag filter can
@@ -1548,13 +1554,13 @@ fn spawn_fetch(
     };
     let post_type = config.post_type.clone();
     tokio::spawn(async move {
-        fetch_page(&client, &blog_name, cursor, window_offset, tag, post_type, quiet).await
+        fetch_page(&session, &blog_name, cursor, window_offset, tag, post_type, quiet).await
     })
 }
 
 /// Fetches one page of posts with the shared timeout/retry/rate-limit policy.
 async fn fetch_page(
-    client: &Crabrave,
+    session: &Session,
     blog_name: &str,
     before_cursor: PostTimestamp,
     window_offset: u64,
@@ -1563,7 +1569,8 @@ async fn fetch_page(
     quiet: bool,
 ) -> anyhow::Result<PostsResponse> {
     api::send_with_retries(
-        || {
+        session,
+        |client| {
             let mut builder = client
                 .blogs(blog_name.to_owned())
                 .posts()
