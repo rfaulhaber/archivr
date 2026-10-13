@@ -4,7 +4,7 @@
 //! that comes back in the response's `_links`; each page is fetched with the
 //! shared retry/rate-limit policy from [`crate::api`].
 
-use crabrave::Crabrave;
+use crate::api::ClientSource;
 use crabrave::handlers::blog::{Note, NoteMode, NotesResponse, RollupNoteGroup};
 use serde::Serialize;
 
@@ -52,7 +52,7 @@ fn next_cursor(current: Option<i64>, response: &NotesResponse) -> Option<i64> {
 /// Fetches every note on a post (or the newest `limit`, if set), following
 /// the server's pagination cursor until it runs out.
 pub async fn fetch_post_notes(
-    client: &Crabrave,
+    source: &impl ClientSource,
     blog_name: &str,
     post_id: &str,
     limit: Option<u64>,
@@ -76,7 +76,8 @@ pub async fn fetch_post_notes(
         pages += 1;
 
         let response: NotesResponse = api::send_with_retries(
-            || {
+            source,
+            |client| {
                 let mut builder = client
                     .blogs(blog_name.to_owned())
                     .notes(post_id.to_owned())
