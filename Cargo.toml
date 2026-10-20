@@ -29,7 +29,7 @@ directories = "6"
 env_logger = "0.11"
 fs-err = { version = "3.2", features = ["tokio"] }
 log = "0.4"
-minijinja = "2.14"
+minijinja = "3.0"
 open = "5.3"
 parking_lot = "0.12.5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
