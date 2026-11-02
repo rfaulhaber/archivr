@@ -53,8 +53,8 @@ pub struct Args {
 
     #[arg(
         long,
-        conflicts_with_all = ["resume", "after"],
-        help = "Fetch only posts newer than the last successful backup. Falls back to a full backup if no prior state exists"
+        conflicts_with = "after",
+        help = "Fetch only posts newer than the last successful backup. Falls back to a full backup if no prior state exists. With --resume, an interrupted backup is finished first"
     )]
     pub incremental: bool,
 
@@ -476,6 +476,13 @@ mod tests {
     #[test]
     fn blog_name_is_required() {
         assert!(Args::try_parse_from(["archivr"]).is_err());
+    }
+
+    #[test]
+    fn incremental_combines_with_resume_but_not_after() {
+        let args = Args::try_parse_from(["archivr", "b", "--incremental", "--resume"]).unwrap();
+        assert!(args.incremental && args.resume);
+        assert!(Args::try_parse_from(["archivr", "b", "--incremental", "--after", "2024-01-01"]).is_err());
     }
 
     #[test]

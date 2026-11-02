@@ -129,7 +129,7 @@ archivr records the timestamp of the newest post archived in `.archivr-state.jso
 
 If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline.
 
-`--incremental` is mutually exclusive with `--resume` and `--after`. If a previous run was interrupted, finish it with `--resume` first, then run `--incremental` next time.
+`--incremental` is mutually exclusive with `--after`. Combined with `--resume`, a run first finishes any interrupted backup in the output directory, using that backup's own settings, and otherwise runs incrementally. Use both flags for scheduled backups: a plain `--incremental` run replaces an unfinished backup and starts over.
 
 ### Notes backup
 

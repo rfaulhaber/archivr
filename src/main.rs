@@ -152,10 +152,52 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
     // the process exits.
     let _lock = lock_output_dir(&config.output_dir)?;
 
+    let job_file = JobState::job_file_path(&config.output_dir);
+    let job_file_exists = fs_err::exists(&job_file).unwrap_or(false);
+    let mut loaded_job: Option<JobState> = None;
+    if config.resume && job_file_exists {
+        match JobState::load(&job_file) {
+            Ok(loaded) => {
+                if loaded.blog_name != config.blog_name {
+                    return Err(anyhow::anyhow!(
+                        "job file at {} is for blog `{}`, but `{}` was requested. \
+                         Resume from the matching output directory or omit --resume to start fresh.",
+                        job_file,
+                        loaded.blog_name,
+                        config.blog_name
+                    ));
+                }
+                loaded_job = Some(loaded);
+            }
+            Err(e) => {
+                // Not gated on --quiet: silently restarting from the beginning
+                // when the user explicitly asked to resume is the kind of
+                // surprise worth a line of output.
+                say!(
+                    "Warning: could not read the saved job file at {job_file} ({e}); \
+                     starting a new backup from the beginning."
+                )?;
+            }
+        }
+    } else if job_file_exists && config.post_ids.is_empty() {
+        // Not gated on --quiet: the job about to be replaced may hold hours
+        // of rate-limited progress.
+        let progress = JobState::load(&job_file)
+            .map(|job| format!(" ({} posts archived so far)", job.archived_count))
+            .unwrap_or_default();
+        say!(
+            "Note: this run replaces the unfinished backup recorded in {job_file}{progress}; \
+             pass --resume to continue that backup instead."
+        )?;
+    }
+
     let state_file = BackupState::state_file_path(&config.output_dir);
     let prior_state = BackupState::load(&state_file).ok();
 
-    if config.incremental {
+    // A resumed job carries its own saved query, including the `--after`
+    // floor it started with, so only a new job takes its floor from the
+    // state file.
+    if config.incremental && loaded_job.is_none() {
         match prior_state.as_ref() {
             Some(s) if s.blog_name == config.blog_name
                 && s.filters != config.filter_descriptor() =>
@@ -199,34 +241,6 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
                         "Incremental backup: no prior state found, performing a full backup to establish baseline"
                     )?;
                 }
-            }
-        }
-    }
-
-    let job_file = JobState::job_file_path(&config.output_dir);
-    let mut loaded_job: Option<JobState> = None;
-    if config.resume && fs_err::exists(&job_file).unwrap_or(false) {
-        match JobState::load(&job_file) {
-            Ok(loaded) => {
-                if loaded.blog_name != config.blog_name {
-                    return Err(anyhow::anyhow!(
-                        "job file at {} is for blog `{}`, but `{}` was requested. \
-                         Resume from the matching output directory or omit --resume to start fresh.",
-                        job_file,
-                        loaded.blog_name,
-                        config.blog_name
-                    ));
-                }
-                loaded_job = Some(loaded);
-            }
-            Err(e) => {
-                // Not gated on --quiet: silently restarting from the beginning
-                // when the user explicitly asked to resume is the kind of
-                // surprise worth a line of output.
-                say!(
-                    "Warning: could not read the saved job file at {job_file} ({e}); \
-                     starting a new backup from the beginning."
-                )?;
             }
         }
     }

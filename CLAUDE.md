@@ -56,7 +56,7 @@ Exit codes are part of the CLI contract (documented in the README): 0 archived s
 
 ### Incremental backups
 
-`--incremental` mode uses a `.archivr-state.json` file in the output directory to persist the timestamp of the newest post archived in the last successful run. On the next incremental run, this timestamp is passed to the Tumblr API as the `after` filter so only newer posts are fetched. The state file outlives runs (unlike `.archivr-job.json`, which is deleted on success). First-time use with no prior state falls back to a full backup to establish the baseline. The flag conflicts with `--resume` and `--after`.
+`--incremental` mode uses a `.archivr-state.json` file in the output directory to persist the timestamp of the newest post archived in the last successful run. On the next incremental run, this timestamp becomes the `after` floor: the newest-first `before` walk stops at the first page reaching it, so only newer posts are fetched. The state file outlives runs (unlike `.archivr-job.json`, which is deleted on success). First-time use with no prior state falls back to a full backup to establish the baseline. The flag conflicts with `--after`. Combined with `--resume`, an existing job file is finished first with its saved parameters; only a new job takes its floor from the state file.
 
 ## Strict Linting Rules
 
