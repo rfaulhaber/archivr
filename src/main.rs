@@ -679,7 +679,7 @@ async fn run_backup(
         && config.skip.is_none();
     let mut reported_total: Option<u64> = None;
     let mut buffered: Option<BufferedHtmlPost> = None;
-    let mut newest_observed: Option<PostTimestamp> = None;
+    let mut newest_observed: Option<PostTimestamp> = job.newest_observed;
     // Ids processed this run. Window jumps deliberately re-include the boundary
     // second (so same-second posts can never be skipped), which makes re-seeing
     // a few posts per page normal; this set keeps them from being re-processed.
@@ -967,6 +967,7 @@ async fn run_backup(
             // instead of skipping it.
             cursor = next_cursor;
             job.before_cursor = Some(cursor);
+            job.newest_observed = newest_observed;
             job.last_page_ids = response.posts.iter().map(|p| p.id.clone()).collect();
             job.archived_count = posts_archived;
             job.skipped_count = posts_skipped;
