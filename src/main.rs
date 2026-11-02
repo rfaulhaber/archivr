@@ -152,10 +152,66 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
     // the process exits.
     let _lock = lock_output_dir(&config.output_dir)?;
 
-    let state_file = BackupState::state_file_path(&config.output_dir);
-    let prior_state = BackupState::load(&state_file).ok();
+    let job_file = JobState::job_file_path(&config.output_dir);
+    let job_file_exists = fs_err::exists(&job_file).unwrap_or(false);
+    let mut loaded_job: Option<JobState> = None;
+    if config.resume && job_file_exists {
+        match JobState::load(&job_file) {
+            Ok(loaded) => {
+                if loaded.blog_name != config.blog_name {
+                    return Err(anyhow::anyhow!(
+                        "job file at {} is for blog `{}`, but `{}` was requested. \
+                         Resume from the matching output directory or omit --resume to start fresh.",
+                        job_file,
+                        loaded.blog_name,
+                        config.blog_name
+                    ));
+                }
+                loaded_job = Some(loaded);
+            }
+            Err(e) => {
+                // Not gated on --quiet: silently restarting from the beginning
+                // when the user explicitly asked to resume is the kind of
+                // surprise worth a line of output.
+                say!(
+                    "Warning: could not read the saved job file at {job_file} ({e}); \
+                     starting a new backup from the beginning."
+                )?;
+            }
+        }
+    } else if job_file_exists && config.post_ids.is_empty() {
+        // Not gated on --quiet: the job about to be replaced may hold hours
+        // of rate-limited progress.
+        let progress = JobState::load(&job_file)
+            .map(|job| format!(" ({} posts archived so far)", job.archived_count))
+            .unwrap_or_default();
+        say!(
+            "Note: this run replaces the unfinished backup recorded in {job_file}{progress}; \
+             pass --resume to continue that backup instead."
+        )?;
+    }
 
-    if config.incremental {
+    let state_file = BackupState::state_file_path(&config.output_dir);
+    let prior_state = match BackupState::load_if_present(&state_file) {
+        Ok(state) => state,
+        Err(e) if config.incremental => {
+            return Err(e.context(format!(
+                "could not read the incremental state file at {state_file}. Fix it, or \
+                 delete it to make this run a full backup that re-establishes the baseline"
+            )));
+        }
+        // Other runs don't rely on the mark, so they proceed as if there
+        // were none.
+        Err(e) => {
+            log::warn!("ignoring the unreadable state file at {state_file}: {e:#}");
+            None
+        }
+    };
+
+    // A resumed job carries its own saved query, including the `--after`
+    // floor it started with, so only a new job takes its floor from the
+    // state file.
+    if config.incremental && loaded_job.is_none() {
         match prior_state.as_ref() {
             Some(s) if s.blog_name == config.blog_name
                 && s.filters != config.filter_descriptor() =>
@@ -199,34 +255,6 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
                         "Incremental backup: no prior state found, performing a full backup to establish baseline"
                     )?;
                 }
-            }
-        }
-    }
-
-    let job_file = JobState::job_file_path(&config.output_dir);
-    let mut loaded_job: Option<JobState> = None;
-    if config.resume && fs_err::exists(&job_file).unwrap_or(false) {
-        match JobState::load(&job_file) {
-            Ok(loaded) => {
-                if loaded.blog_name != config.blog_name {
-                    return Err(anyhow::anyhow!(
-                        "job file at {} is for blog `{}`, but `{}` was requested. \
-                         Resume from the matching output directory or omit --resume to start fresh.",
-                        job_file,
-                        loaded.blog_name,
-                        config.blog_name
-                    ));
-                }
-                loaded_job = Some(loaded);
-            }
-            Err(e) => {
-                // Not gated on --quiet: silently restarting from the beginning
-                // when the user explicitly asked to resume is the kind of
-                // surprise worth a line of output.
-                say!(
-                    "Warning: could not read the saved job file at {job_file} ({e}); \
-                     starting a new backup from the beginning."
-                )?;
             }
         }
     }
@@ -679,7 +707,7 @@ async fn run_backup(
         && config.skip.is_none();
     let mut reported_total: Option<u64> = None;
     let mut buffered: Option<BufferedHtmlPost> = None;
-    let mut newest_observed: Option<PostTimestamp> = None;
+    let mut newest_observed: Option<PostTimestamp> = job.newest_observed;
     // Ids processed this run. Window jumps deliberately re-include the boundary
     // second (so same-second posts can never be skipped), which makes re-seeing
     // a few posts per page normal; this set keeps them from being re-processed.
@@ -716,10 +744,9 @@ async fn run_backup(
         Some(saved) => saved,
         None => config.before.unwrap_or(job.started_at + 1),
     };
-    let mut window_offset: u64 = job.window_offset;
 
     let loop_result: anyhow::Result<()> = async {
-        let mut pending_fetch = Some(spawn_fetch(session, config, cursor, window_offset));
+        let mut pending_fetch = Some(spawn_fetch(session, config, cursor));
         loop {
             let Some(fetch) = pending_fetch.take() else {
                 break;
@@ -748,8 +775,15 @@ async fn run_backup(
                 .map(|p| p.timestamp)
                 .min()
                 .unwrap_or(cursor);
-            let (next_cursor, next_window_offset) =
-                advance_window(cursor, window_offset, batch_min, response.posts.len());
+            let next_cursor = advance_window(cursor, batch_min);
+            if page_overflows_second(cursor, batch_min, response.posts.len()) {
+                // Not gated on --quiet: posts may be missing from the archive.
+                say!(
+                    "Warning: a full page of posts shares the timestamp {batch_min}, and \
+                     Tumblr's API cannot page within one second; any further posts from \
+                     that second were not archived."
+                )?;
+            }
 
             // `--after` (and incremental mode) act as a client-side floor:
             // `before`-windows have a guaranteed order, unlike server-side
@@ -766,8 +800,10 @@ async fn run_backup(
                 .collect();
 
             // If pages stop yielding unseen posts the server is likely not
-            // honoring our pagination (e.g. `offset` within a window); abort
-            // rather than refetch the same page forever.
+            // honoring our pagination (e.g. ignoring `before`); abort rather
+            // than refetch the same page forever. A healthy walk stalls on
+            // exactly one page, the already-seen boundary second at the
+            // blog's oldest post.
             if new_posts.is_empty() && !reached_floor {
                 stalled_pages += 1;
                 if stalled_pages >= MAX_STALLED_PAGES {
@@ -784,7 +820,7 @@ async fn run_backup(
             // Start fetching the next page now, so the API round-trip runs
             // concurrently with this batch's downloads and rendering.
             if !reached_floor {
-                pending_fetch = Some(spawn_fetch(session, config, next_cursor, next_window_offset));
+                pending_fetch = Some(spawn_fetch(session, config, next_cursor));
             }
 
             // Post-selection filters. A single `--include-tags` tag is also
@@ -958,9 +994,8 @@ async fn run_backup(
             // interrupt before this line re-fetches the batch on --resume
             // instead of skipping it.
             cursor = next_cursor;
-            window_offset = next_window_offset;
             job.before_cursor = Some(cursor);
-            job.window_offset = window_offset;
+            job.newest_observed = newest_observed;
             job.last_page_ids = response.posts.iter().map(|p| p.id.clone()).collect();
             job.archived_count = posts_archived;
             job.skipped_count = posts_skipped;
@@ -1484,8 +1519,8 @@ async fn backup_special(
         for post in &posts {
             seen_ids.insert(post.id.clone());
         }
-        // Overlap the offset stride by one post, mirroring advance_window's
-        // deletion insurance: the queue is guaranteed to shrink under us
+        // Overlap the offset stride by one post as deletion insurance: the
+        // queue is guaranteed to shrink under us
         // (Tumblr publishes from it on a schedule), and a full stride would
         // silently skip the post that shifts into the gap. Re-included posts
         // are filtered by seen_ids.
@@ -1534,13 +1569,16 @@ fn heal_resumed_older_link(file: &camino::Utf8Path, older_html: &str) -> anyhow:
 /// not making progress.
 const MAX_STALLED_PAGES: u32 = 3;
 
+/// Posts per page of the main window: Tumblr's maximum, requested explicitly
+/// so a full page can be recognized.
+const PAGE_SIZE: u32 = 20;
+
 /// Fetches a page on a separate task so the API round-trip (including any
 /// rate-limit sleep) overlaps with processing of the previous batch.
 fn spawn_fetch(
     session: &Session,
     config: &ResolvedConfig,
     cursor: PostTimestamp,
-    window_offset: u64,
 ) -> tokio::task::JoinHandle<anyhow::Result<PostsResponse>> {
     let session = session.clone();
     let blog_name = config.blog_name.clone();
@@ -1554,7 +1592,7 @@ fn spawn_fetch(
     };
     let post_type = config.post_type.clone();
     tokio::spawn(async move {
-        fetch_page(&session, &blog_name, cursor, window_offset, tag, post_type, quiet).await
+        fetch_page(&session, &blog_name, cursor, tag, post_type, quiet).await
     })
 }
 
@@ -1563,7 +1601,6 @@ async fn fetch_page(
     session: &Session,
     blog_name: &str,
     before_cursor: PostTimestamp,
-    window_offset: u64,
     tag: Option<String>,
     post_type: Option<String>,
     quiet: bool,
@@ -1574,10 +1611,8 @@ async fn fetch_page(
             let mut builder = client
                 .blogs(blog_name.to_owned())
                 .posts()
+                .limit(PAGE_SIZE)
                 .before(before_cursor);
-            if window_offset > 0 {
-                builder = builder.offset(window_offset);
-            }
             if let Some(ref t) = tag {
                 builder = builder.tag(t.clone());
             }
@@ -1619,30 +1654,34 @@ fn post_matches_filters(
     true
 }
 
-/// Decides the next pagination window after a fetched batch.
+/// Decides the next pagination cursor after a fetched batch.
 ///
 /// Normally the cursor jumps to just above the oldest timestamp in the batch:
 /// the next window then re-includes that boundary second, so same-second posts
 /// straddling a page break can never be skipped (re-seen ones are filtered by
-/// id). When an entire page shares one second the cursor cannot move, so page
-/// within the unchanged window by offset instead — overlapping the stride by
-/// one so a single deletion inside that second shifts a seen post into view
-/// (a re-fetch) rather than an unseen one out of it (a skip). A deletion
-/// anywhere outside the current same-second window can only cause re-fetches;
-/// several deletions inside one >page-sized second between two fetches can
-/// still lose a post, an unavoidable limit of Tumblr's before+offset API.
-fn advance_window(
+/// id). When the whole batch lies in the window's last second the cursor
+/// cannot jump, so it steps below that second instead. Tumblr ignores `offset`
+/// alongside `before`, so this step is the only way out of such a window: it
+/// is what ends the walk at the blog's oldest post, whose final page holds
+/// nothing but the already-seen boundary second.
+fn advance_window(cursor: PostTimestamp, batch_min: PostTimestamp) -> PostTimestamp {
+    if batch_min + 1 < cursor {
+        batch_min + 1
+    } else {
+        cursor - 1
+    }
+}
+
+/// Whether a batch filled a whole page inside the one second
+/// [`advance_window`] is about to step below. That second may hold more posts
+/// than fit on a page, and with no way to page within it, the rest are
+/// skipped.
+fn page_overflows_second(
     cursor: PostTimestamp,
-    window_offset: u64,
     batch_min: PostTimestamp,
     batch_len: usize,
-) -> (PostTimestamp, u64) {
-    if batch_min + 1 < cursor {
-        (batch_min + 1, 0)
-    } else {
-        let stride = (batch_len as u64).saturating_sub(1).max(1);
-        (cursor, window_offset + stride)
-    }
+) -> bool {
+    batch_min + 1 >= cursor && batch_len >= PAGE_SIZE as usize
 }
 
 #[cfg(test)]
@@ -1654,35 +1693,108 @@ mod tests {
     fn advance_window_jumps_past_boundary_second() {
         // Normal page: oldest post well below the cursor → jump to just above
         // it, so the next window re-includes the boundary second.
-        assert_eq!(advance_window(1_000, 0, 500, 20), (501, 0));
+        assert_eq!(advance_window(1_000, 500), 501);
     }
 
     #[test]
-    fn advance_window_pages_within_single_second_run() {
+    fn advance_window_steps_below_a_window_stuck_in_one_second() {
         // Entire page shares the second just below the cursor: the cursor
-        // cannot advance, so walk the same window by offset, overlapping the
-        // stride by one post as deletion insurance.
-        assert_eq!(advance_window(501, 0, 500, 20), (501, 19));
-        assert_eq!(advance_window(501, 19, 500, 20), (501, 38));
-    }
-
-    #[test]
-    fn advance_window_offset_stride_always_progresses() {
-        // A single-post page must still advance the offset despite the
-        // one-post overlap rule.
-        assert_eq!(advance_window(501, 5, 500, 1), (501, 6));
+        // cannot jump, so step below that second.
+        assert_eq!(advance_window(501, 500), 500);
     }
 
     #[test]
     fn advance_window_handles_inclusive_bound() {
         // If the server treats `before` inclusively a post can share the
-        // cursor's own timestamp; the window must not move upward.
-        assert_eq!(advance_window(500, 0, 500, 20), (500, 19));
+        // cursor's own timestamp; the window must still move down.
+        assert_eq!(advance_window(500, 500), 499);
     }
 
     #[test]
-    fn advance_window_resets_offset_on_jump() {
-        assert_eq!(advance_window(501, 40, 100, 20), (101, 0));
+    fn a_full_page_stuck_in_one_second_overflows_it() {
+        assert!(page_overflows_second(501, 500, PAGE_SIZE as usize));
+    }
+
+    #[test]
+    fn short_or_jumping_pages_do_not_overflow() {
+        // Every post of the stuck second fit on this page.
+        assert!(!page_overflows_second(501, 500, 3));
+        // The next window re-includes this page's oldest second.
+        assert!(!page_overflows_second(1_000, 500, PAGE_SIZE as usize));
+    }
+
+    /// `(id, timestamp)` pairs standing in for a blog's posts.
+    type FakeBlog = Vec<(u64, PostTimestamp)>;
+
+    /// Tumblr's `/posts?before=` as observed on the live API: one page of the
+    /// posts strictly older than `before`, newest first. `offset` is ignored
+    /// whenever `before` is present, so the model takes none.
+    fn tumblr_before_page(blog: &FakeBlog, before: PostTimestamp) -> FakeBlog {
+        let mut older: FakeBlog = blog.iter().copied().filter(|&(_, ts)| ts < before).collect();
+        older.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+        older.truncate(PAGE_SIZE as usize);
+        older
+    }
+
+    /// Paginates `blog` from `top` down the way `run_backup` walks an
+    /// unfloored window, returning the ids it visited, or `Err` with the
+    /// number of pages fetched if the walk stalls or fails to terminate.
+    fn walk_blog(blog: &FakeBlog, top: PostTimestamp) -> Result<HashSet<u64>, usize> {
+        let mut cursor = top;
+        let mut seen = HashSet::new();
+        let mut stalled_pages = 0;
+        for pages in 1..=blog.len() + 10 {
+            let page = tumblr_before_page(blog, cursor);
+            let Some(batch_min) = page.iter().map(|&(_, ts)| ts).min() else {
+                return Ok(seen);
+            };
+            if page.iter().all(|(id, _)| seen.contains(id)) {
+                stalled_pages += 1;
+                if stalled_pages >= MAX_STALLED_PAGES {
+                    return Err(pages);
+                }
+            } else {
+                stalled_pages = 0;
+            }
+            seen.extend(page.iter().map(|&(id, _)| id));
+            cursor = advance_window(cursor, batch_min);
+        }
+        Err(blog.len() + 10)
+    }
+
+    fn ids(blog: &FakeBlog) -> HashSet<u64> {
+        blog.iter().map(|&(id, _)| id).collect()
+    }
+
+    #[test]
+    fn full_walk_ends_at_the_oldest_post() {
+        // Every window re-includes its boundary second, so the last page
+        // always holds only the already-seen oldest post.
+        let blog: FakeBlog = (0..45).map(|i| (i, 1_000 + 10 * i as PostTimestamp)).collect();
+        assert_eq!(walk_blog(&blog, 10_000), Ok(ids(&blog)));
+    }
+
+    #[test]
+    fn full_walk_ends_when_the_oldest_posts_share_a_second() {
+        let mut blog: FakeBlog = (3..23).map(|i| (i, 2_000 + 10 * i as PostTimestamp)).collect();
+        blog.extend((0..3).map(|i| (i, 1_000)));
+        assert_eq!(walk_blog(&blog, 10_000), Ok(ids(&blog)));
+    }
+
+    #[test]
+    fn full_walk_gets_past_a_second_holding_more_than_a_page() {
+        // Tumblr can't page within one second, so the 5 posts of the shared
+        // second that never fit in a page are unreachable; every post around
+        // that second must still be visited and the walk must end.
+        let newer: FakeBlog = (100..110).map(|i| (i, 6_000 + i as PostTimestamp)).collect();
+        let crowded: FakeBlog = (50..75).map(|i| (i, 5_000)).collect();
+        let older: FakeBlog = (0..10).map(|i| (i, 1_000 + i as PostTimestamp)).collect();
+        let blog: FakeBlog = [newer.clone(), crowded.clone(), older.clone()].concat();
+
+        let visited = walk_blog(&blog, 10_000).unwrap();
+        assert!(visited.is_superset(&ids(&newer)));
+        assert!(visited.is_superset(&ids(&older)));
+        assert_eq!(visited.intersection(&ids(&crowded)).count(), 20);
     }
 
     #[test]

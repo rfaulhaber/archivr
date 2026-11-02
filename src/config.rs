@@ -3,9 +3,10 @@ use serde::Deserialize;
 
 use crate::{ArchivrError, Args, JobState, PostTimestamp};
 
+/// The `--config-file` contents: OAuth credentials kept off the command line.
+/// Unknown keys are ignored, so files that still name a `blog_name` load.
 #[derive(Deserialize)]
 pub struct Config {
-    pub blog_name: String,
     pub consumer_key: Option<String>,
     pub consumer_secret: Option<String>,
 }
@@ -15,7 +16,6 @@ pub struct Config {
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
-            .field("blog_name", &self.blog_name)
             .field(
                 "consumer_key",
                 &self.consumer_key.as_ref().map(|_| "<redacted>"),
@@ -281,6 +281,33 @@ mod tests {
         let mut configs = ResolvedConfig::from_args(args).unwrap();
         assert_eq!(configs.len(), 1);
         configs.remove(0)
+    }
+
+    #[test]
+    fn credentials_fall_back_to_a_config_file_holding_only_them() {
+        let dir = Utf8PathBuf::try_from(std::env::temp_dir()).unwrap();
+        let path = dir.join(format!("archivr-test-config-{}.json", std::process::id()));
+        fs_err::write(&path, r#"{"consumer_key":"file-key","consumer_secret":"file-secret"}"#)
+            .unwrap();
+        let mut args = base_args();
+        args.consumer_key = None;
+        args.consumer_secret = None;
+        args.config_file = Some(path.clone());
+
+        let resolved = ResolvedConfig::from_args(args);
+        fs_err::remove_file(&path).unwrap();
+        let config = resolved.unwrap().remove(0);
+        assert_eq!(config.consumer_key, "file-key");
+        assert_eq!(config.consumer_secret, "file-secret");
+    }
+
+    #[test]
+    fn config_files_naming_a_blog_still_load() {
+        // Earlier docs asked for a `blog_name` key, which never selected
+        // anything: the blogs always come from the command line.
+        let config: Config =
+            serde_json::from_str(r#"{"blog_name":"b","consumer_key":"k"}"#).unwrap();
+        assert_eq!(config.consumer_key.as_deref(), Some("k"));
     }
 
     #[test]

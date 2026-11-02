@@ -36,13 +36,30 @@ pub struct Args {
     )]
     pub blog_names: Vec<String>,
 
-    #[arg(long, help = "Tumblr OAuth consumer key")]
+    // Command lines are visible to other local users (`ps`) and get logged
+    // by service managers, so the credentials can also come from the
+    // environment or the config file; `hide_env_values` keeps `--help` from
+    // printing them.
+    #[arg(
+        long,
+        env = "ARCHIVR_CONSUMER_KEY",
+        hide_env_values = true,
+        help = "Tumblr OAuth consumer key"
+    )]
     pub consumer_key: Option<String>,
 
-    #[arg(long, help = "Tumblr OAuth consumer secret")]
+    #[arg(
+        long,
+        env = "ARCHIVR_CONSUMER_SECRET",
+        hide_env_values = true,
+        help = "Tumblr OAuth consumer secret"
+    )]
     pub consumer_secret: Option<String>,
 
-    #[arg(long, help = "Job config file")]
+    #[arg(
+        long,
+        help = "JSON file holding `consumer_key` and `consumer_secret`, used when neither flags nor environment variables provide them"
+    )]
     pub config_file: Option<Utf8PathBuf>,
 
     #[arg(
@@ -53,8 +70,8 @@ pub struct Args {
 
     #[arg(
         long,
-        conflicts_with_all = ["resume", "after"],
-        help = "Fetch only posts newer than the last successful backup. Falls back to a full backup if no prior state exists"
+        conflicts_with = "after",
+        help = "Fetch only posts newer than the last successful backup. Falls back to a full backup if no prior state exists. With --resume, an interrupted backup is finished first"
     )]
     pub incremental: bool,
 
@@ -476,6 +493,27 @@ mod tests {
     #[test]
     fn blog_name_is_required() {
         assert!(Args::try_parse_from(["archivr"]).is_err());
+    }
+
+    #[test]
+    fn credentials_can_come_from_the_environment_without_showing_in_help() {
+        use clap::CommandFactory as _;
+        let command = Args::command();
+        for (id, var) in [
+            ("consumer_key", "ARCHIVR_CONSUMER_KEY"),
+            ("consumer_secret", "ARCHIVR_CONSUMER_SECRET"),
+        ] {
+            let arg = command.get_arguments().find(|a| a.get_id() == id).unwrap();
+            assert_eq!(arg.get_env(), Some(std::ffi::OsStr::new(var)));
+            assert!(arg.is_hide_env_values_set());
+        }
+    }
+
+    #[test]
+    fn incremental_combines_with_resume_but_not_after() {
+        let args = Args::try_parse_from(["archivr", "b", "--incremental", "--resume"]).unwrap();
+        assert!(args.incremental && args.resume);
+        assert!(Args::try_parse_from(["archivr", "b", "--incremental", "--after", "2024-01-01"]).is_err());
     }
 
     #[test]

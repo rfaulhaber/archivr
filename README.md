@@ -59,9 +59,9 @@ archivr blog-one blog-two blog-three --consumer-key KEY --consumer-secret SECRET
 
 | Flag                | Short | Description                                                                        |
 |---------------------|-------|------------------------------------------------------------------------------------|
-| `--consumer-key`    |       | Tumblr OAuth consumer key                                                          |
-| `--consumer-secret` |       | Tumblr OAuth consumer secret                                                       |
-| `--config-file`     |       | Path to a JSON config file with `blog_name`, `consumer_key`, and `consumer_secret` |
+| `--consumer-key`    |       | Tumblr OAuth consumer key (or `ARCHIVR_CONSUMER_KEY`)                              |
+| `--consumer-secret` |       | Tumblr OAuth consumer secret (or `ARCHIVR_CONSUMER_SECRET`)                        |
+| `--config-file`     |       | Path to a JSON file with `consumer_key` and `consumer_secret`                      |
 | `--output-dir`      | `-o`  | Output directory (defaults to `./{blog_name}`)                                     |
 | `--json`            |       | Save posts as raw JSON instead of HTML                                             |
 | `--template`        | `-t`  | Custom Jinja template for HTML output (exclusive with `--json`)                    |
@@ -127,9 +127,9 @@ archivr my-blog --consumer-key KEY --consumer-secret SECRET --incremental
 
 archivr records the timestamp of the newest post archived in `.archivr-state.json` (inside the output directory). On the next incremental run, only posts newer than that timestamp are fetched. The state file persists across runs and is updated on every successful backup.
 
-If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline.
+If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline. A state file that exists but can't be read stops an incremental run with an error instead, so a damaged file never silently costs a full re-fetch; fix it, or delete it to re-establish the baseline.
 
-`--incremental` is mutually exclusive with `--resume` and `--after`. If a previous run was interrupted, finish it with `--resume` first, then run `--incremental` next time.
+`--incremental` is mutually exclusive with `--after`. Combined with `--resume`, a run first finishes any interrupted backup in the output directory, using that backup's own settings, and otherwise runs incrementally. Use both flags for scheduled backups: a plain `--incremental` run replaces an unfinished backup and starts over.
 
 ### Notes backup
 
@@ -214,9 +214,14 @@ For scripting, archivr exits with:
 
 A lock file (`.archivr-lock`) in each output directory prevents two archivr instances from writing to the same archive at once; the lock is released automatically when the process exits, however it exits.
 
-### Job config file
+### Keeping credentials off the command line
 
-You can specify all of the CLI arguments in a config file as well, passing `--config-file <PATH>` instead.
+A command line is visible to other users on the machine (`ps`), and service managers such as systemd log the full command of every unit they start. For scheduled runs or shared machines, pass the consumer key and secret another way:
+
+- The `ARCHIVR_CONSUMER_KEY` and `ARCHIVR_CONSUMER_SECRET` environment variables, for example from a systemd `EnvironmentFile=`.
+- `--config-file <PATH>`, a JSON file such as `{"consumer_key": "...", "consumer_secret": "..."}`. Make it readable only by you.
+
+Flags take precedence over environment variables, and environment variables over the config file.
 
 ### Custom templates
 
