@@ -813,6 +813,14 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// Pins the exact name: existing archives reference media by these
+    /// filenames, so any change here orphans already-downloaded files.
+    #[test]
+    fn local_filename_is_stable() {
+        let filename = local_filename_for_url("https://64.media.tumblr.com/abc/s640x960/photo.png");
+        assert_eq!(filename, "264e23972f719483_photo.png");
+    }
+
     #[test]
     fn local_filename_contains_original_name() {
         let filename = local_filename_for_url("https://example.com/path/to/photo.png");
