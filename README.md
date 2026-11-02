@@ -59,9 +59,9 @@ archivr blog-one blog-two blog-three --consumer-key KEY --consumer-secret SECRET
 
 | Flag                | Short | Description                                                                        |
 |---------------------|-------|------------------------------------------------------------------------------------|
-| `--consumer-key`    |       | Tumblr OAuth consumer key                                                          |
-| `--consumer-secret` |       | Tumblr OAuth consumer secret                                                       |
-| `--config-file`     |       | Path to a JSON config file with `blog_name`, `consumer_key`, and `consumer_secret` |
+| `--consumer-key`    |       | Tumblr OAuth consumer key (or `ARCHIVR_CONSUMER_KEY`)                              |
+| `--consumer-secret` |       | Tumblr OAuth consumer secret (or `ARCHIVR_CONSUMER_SECRET`)                        |
+| `--config-file`     |       | Path to a JSON file with `consumer_key` and `consumer_secret`                      |
 | `--output-dir`      | `-o`  | Output directory (defaults to `./{blog_name}`)                                     |
 | `--json`            |       | Save posts as raw JSON instead of HTML                                             |
 | `--template`        | `-t`  | Custom Jinja template for HTML output (exclusive with `--json`)                    |
@@ -214,9 +214,14 @@ For scripting, archivr exits with:
 
 A lock file (`.archivr-lock`) in each output directory prevents two archivr instances from writing to the same archive at once; the lock is released automatically when the process exits, however it exits.
 
-### Job config file
+### Keeping credentials off the command line
 
-You can specify all of the CLI arguments in a config file as well, passing `--config-file <PATH>` instead.
+A command line is visible to other users on the machine (`ps`), and service managers such as systemd log the full command of every unit they start. For scheduled runs or shared machines, pass the consumer key and secret another way:
+
+- The `ARCHIVR_CONSUMER_KEY` and `ARCHIVR_CONSUMER_SECRET` environment variables, for example from a systemd `EnvironmentFile=`.
+- `--config-file <PATH>`, a JSON file such as `{"consumer_key": "...", "consumer_secret": "..."}`. Make it readable only by you.
+
+Flags take precedence over environment variables, and environment variables over the config file.
 
 ### Custom templates
 
