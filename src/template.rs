@@ -333,26 +333,26 @@ fn post_to_value(post: &Post, no_embeds: bool) -> Value {
     let tags: Vec<Value> = post.tags.iter().map(|t| Value::from(t.as_str())).collect();
 
     context! {
-        id => post.id,
-        blog_name => post.blog_name,
-        post_url => post.post_url,
-        post_type => post.post_type,
-        original_type => post.original_type,
+        id => &post.id,
+        blog_name => &post.blog_name,
+        post_url => &post.post_url,
+        post_type => &post.post_type,
+        original_type => &post.original_type,
         timestamp => post.timestamp,
-        date => post.date,
+        date => &post.date,
         content => content,
         trail => trail,
         tags => tags,
-        summary => post.summary,
+        summary => &post.summary,
         note_count => post.note_count,
-        slug => post.slug,
-        short_url => post.short_url,
-        reblog_key => post.reblog_key,
-        state => post.state,
-        reblogged_from_name => post.reblogged_from_name,
-        reblogged_from_url => post.reblogged_from_url,
-        reblogged_root_name => post.reblogged_root_name,
-        reblogged_root_url => post.reblogged_root_url,
+        slug => &post.slug,
+        short_url => &post.short_url,
+        reblog_key => &post.reblog_key,
+        state => &post.state,
+        reblogged_from_name => &post.reblogged_from_name,
+        reblogged_from_url => &post.reblogged_from_url,
+        reblogged_root_name => &post.reblogged_root_name,
+        reblogged_root_url => &post.reblogged_root_url,
         liked => post.liked,
         followed => post.followed,
     }
@@ -392,10 +392,10 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
             };
 
             let media_values = vec![context! {
-                url => m.url,
+                url => &m.url,
                 width => m.width,
                 height => m.height,
-                media_type => m.media_type,
+                media_type => &m.media_type,
             }];
             context! {
                 type => "image",
@@ -418,10 +418,10 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
                 .as_ref()
                 .map(|m| {
                     vec![context! {
-                        url => m.url,
+                        url => &m.url,
                         width => m.width,
                         height => m.height,
-                        media_type => m.media_type,
+                        media_type => &m.media_type,
                     }]
                 })
                 .unwrap_or_default();
@@ -450,8 +450,8 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
                 .as_ref()
                 .map(|m| {
                     vec![context! {
-                        url => m.url,
-                        media_type => m.media_type,
+                        url => &m.url,
+                        media_type => &m.media_type,
                     }]
                 })
                 .unwrap_or_default();
@@ -497,17 +497,17 @@ fn content_block_to_value(block: &ContentBlock, no_embeds: bool) -> Value {
                 .iter()
                 .map(|a| {
                     context! {
-                        client_id => a.client_id,
-                        answer_text => a.answer_text,
+                        client_id => &a.client_id,
+                        answer_text => &a.answer_text,
                     }
                 })
                 .collect();
             let settings_value = settings.as_ref().map(|s| {
                 context! {
                     multiple_choice => s.multiple_choice,
-                    close_status => s.close_status,
+                    close_status => &s.close_status,
                     expire_after => s.expire_after,
-                    source => s.source,
+                    source => &s.source,
                 }
             });
             context! {
@@ -537,15 +537,15 @@ fn format_note_date(timestamp: i64) -> Option<String> {
 /// Converts a Note to a minijinja Value
 fn note_to_value(note: &Note) -> Value {
     context! {
-        note_type => note.note_type,
+        note_type => &note.note_type,
         timestamp => note.timestamp,
         date => format_note_date(note.timestamp),
-        blog_name => note.blog_name,
-        blog_url => note.blog_url,
-        reply_text => note.reply_text,
-        added_text => note.added_text,
-        reblog_parent_blog_name => note.reblog_parent_blog_name,
-        tags => note.tags,
+        blog_name => &note.blog_name,
+        blog_url => &note.blog_url,
+        reply_text => &note.reply_text,
+        added_text => &note.added_text,
+        reblog_parent_blog_name => &note.reblog_parent_blog_name,
+        tags => note.tags.clone(),
     }
 }
 
@@ -582,15 +582,15 @@ fn trail_item_to_value(item: &TrailItem, no_embeds: bool) -> Value {
 
     let blog = item.blog.as_ref().map(|b| {
         context! {
-            name => b.name,
-            url => b.url,
-            uuid => b.uuid,
+            name => &b.name,
+            url => &b.url,
+            uuid => &b.uuid,
         }
     });
 
     let post = item.post.as_ref().map(|p| {
         context! {
-            id => p.id,
+            id => &p.id,
         }
     });
 
