@@ -192,7 +192,21 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
     }
 
     let state_file = BackupState::state_file_path(&config.output_dir);
-    let prior_state = BackupState::load(&state_file).ok();
+    let prior_state = match BackupState::load_if_present(&state_file) {
+        Ok(state) => state,
+        Err(e) if config.incremental => {
+            return Err(e.context(format!(
+                "could not read the incremental state file at {state_file}. Fix it, or \
+                 delete it to make this run a full backup that re-establishes the baseline"
+            )));
+        }
+        // Other runs don't rely on the mark, so they proceed as if there
+        // were none.
+        Err(e) => {
+            log::warn!("ignoring the unreadable state file at {state_file}: {e:#}");
+            None
+        }
+    };
 
     // A resumed job carries its own saved query, including the `--after`
     // floor it started with, so only a new job takes its floor from the

@@ -30,6 +30,17 @@ impl BackupState {
         Ok(state)
     }
 
+    /// Loads the state file, or `None` if there is none yet. A file that
+    /// exists but can't be read or parsed is an error rather than an absent
+    /// baseline: treating it as absent would silently turn an incremental
+    /// run into a full re-walk of the blog.
+    pub fn load_if_present(path: &Utf8Path) -> anyhow::Result<Option<Self>> {
+        if !fs_err::exists(path)? {
+            return Ok(None);
+        }
+        Self::load(path).map(Some)
+    }
+
     pub fn save(&self, path: &Utf8Path) -> anyhow::Result<()> {
         let content = serde_json::to_string(self)?;
         crate::fsutil::write_atomic(path, content.as_bytes())?;
@@ -88,6 +99,35 @@ mod tests {
         assert_eq!(loaded.newest_post_timestamp, state.newest_post_timestamp);
 
         fs_err::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn load_if_present_treats_a_missing_file_as_no_state() {
+        let dir = Utf8Path::from_path(&std::env::temp_dir()).unwrap().to_owned();
+        let path = dir.join(format!("archivr-test-state-missing-{}.json", std::process::id()));
+        assert!(BackupState::load_if_present(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn load_if_present_rejects_an_unreadable_file() {
+        let dir = Utf8Path::from_path(&std::env::temp_dir()).unwrap().to_owned();
+        let path = dir.join(format!("archivr-test-state-garbled-{}.json", std::process::id()));
+        fs_err::write(&path, r#"{"blog_name":"b","newest_post_timestamp":"#).unwrap();
+
+        let result = BackupState::load_if_present(&path);
+        fs_err::remove_file(&path).unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_if_present_loads_an_existing_file() {
+        let dir = Utf8Path::from_path(&std::env::temp_dir()).unwrap().to_owned();
+        let path = dir.join(format!("archivr-test-state-present-{}.json", std::process::id()));
+        sample_state().save(&path).unwrap();
+
+        let loaded = BackupState::load_if_present(&path).unwrap();
+        fs_err::remove_file(&path).unwrap();
+        assert_eq!(loaded.map(|s| s.newest_post_timestamp), Some(1_700_000_000));
     }
 
     #[test]

@@ -127,7 +127,7 @@ archivr my-blog --consumer-key KEY --consumer-secret SECRET --incremental
 
 archivr records the timestamp of the newest post archived in `.archivr-state.json` (inside the output directory). On the next incremental run, only posts newer than that timestamp are fetched. The state file persists across runs and is updated on every successful backup.
 
-If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline.
+If no prior state file exists (e.g. the first time you use `--incremental`), archivr falls back to a full backup to establish the baseline. A state file that exists but can't be read stops an incremental run with an error instead, so a damaged file never silently costs a full re-fetch; fix it, or delete it to re-establish the baseline.
 
 `--incremental` is mutually exclusive with `--after`. Combined with `--resume`, a run first finishes any interrupted backup in the output directory, using that backup's own settings, and otherwise runs incrementally. Use both flags for scheduled backups: a plain `--incremental` run replaces an unfinished backup and starts over.
 
