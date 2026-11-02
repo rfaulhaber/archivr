@@ -16,11 +16,6 @@ pub struct JobState {
     /// from the top and reuses already-written files.
     #[serde(default)]
     pub before_cursor: Option<PostTimestamp>,
-    /// Page offset *within* the current `before_cursor` window; only nonzero
-    /// while walking a run of posts that share one second-granularity
-    /// timestamp, where the cursor alone cannot advance.
-    #[serde(default)]
-    pub window_offset: u64,
     /// Ids of the most recently committed page. The next window re-includes
     /// the boundary second by design; on `--resume` these seed the seen-set so
     /// already-written files are not rewritten with a severed nav chain.
@@ -103,7 +98,6 @@ impl JobState {
             blog_name: config.blog_name.clone(),
             started_at: chrono::Utc::now().timestamp(),
             before_cursor: None,
-            window_offset: 0,
             last_page_ids: Vec::new(),
             last_post_href: None,
             last_post_file: None,
@@ -170,7 +164,6 @@ mod tests {
             blog_name: "test-blog".to_owned(),
             started_at: 1700000000,
             before_cursor: Some(1699990000),
-            window_offset: 40,
             last_page_ids: vec!["101".to_owned(), "100".to_owned()],
             last_post_href: Some("100.html".to_owned()),
             last_post_file: Some(Utf8PathBuf::from("/tmp/out/100.html")),
@@ -213,7 +206,6 @@ mod tests {
         assert_eq!(deserialized.blog_name, "test-blog");
         assert_eq!(deserialized.started_at, 1700000000);
         assert_eq!(deserialized.before_cursor, Some(1699990000));
-        assert_eq!(deserialized.window_offset, 40);
         assert_eq!(deserialized.last_page_ids, vec!["101", "100"]);
         assert_eq!(deserialized.last_post_href.as_deref(), Some("100.html"));
         assert_eq!(
@@ -260,7 +252,6 @@ mod tests {
         let job: JobState = serde_json::from_str(json).unwrap();
         assert_eq!(job.blog_name, "b");
         assert_eq!(job.before_cursor, None);
-        assert_eq!(job.window_offset, 0);
         assert!(job.last_page_ids.is_empty());
         assert_eq!(job.last_post_href, None);
         assert_eq!(job.last_post_file, None);
@@ -303,8 +294,18 @@ mod tests {
         assert_eq!(job.blog_name, "b");
         assert_eq!(job.started_at, 100);
         assert_eq!(job.before_cursor, None);
-        assert_eq!(job.window_offset, 0);
         assert!(job.json);
+    }
+
+    #[test]
+    fn deserializes_job_file_with_window_offset() {
+        // Job files from archivr 0.6 carry a `window_offset` for paging
+        // within one second; Tumblr ignored it, so dropping it on resume
+        // fetches exactly what that run would have.
+        let json = r#"{"blog_name":"b","started_at":100,"before_cursor":90,"window_offset":2,"last_page_ids":["7"]}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.before_cursor, Some(90));
+        assert_eq!(job.last_page_ids, vec!["7"]);
     }
 
     #[test]
@@ -319,7 +320,6 @@ mod tests {
         let loaded = JobState::load(&path).unwrap();
         assert_eq!(loaded.blog_name, job.blog_name);
         assert_eq!(loaded.before_cursor, job.before_cursor);
-        assert_eq!(loaded.window_offset, job.window_offset);
         assert_eq!(loaded.before, job.before);
         assert_eq!(loaded.save_images, job.save_images);
 
