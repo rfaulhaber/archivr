@@ -20,7 +20,8 @@ pub struct JobState {
     /// The window is walked newest-first, so a resumed process only sees the
     /// older remainder; without this the incremental mark recorded on
     /// completion would come from that remainder alone. `None` in job files
-    /// from older archivr versions, whose resumed runs fall back to it.
+    /// from older archivr versions; see [`JobState::newest_observed_seed`]
+    /// for what resumed runs of those start from.
     #[serde(default)]
     pub newest_observed: Option<PostTimestamp>,
     /// Ids of the most recently committed page. The next window re-includes
@@ -138,6 +139,24 @@ impl JobState {
             skipped_count: 0,
             template_path: config.template_path.clone(),
         }
+    }
+
+    /// Where `run_backup` starts folding page timestamps for the incremental
+    /// mark. Job files from archivr 0.6.0 and 0.6.1 committed a cursor
+    /// without `newest_observed`, and the pages they had walked are the
+    /// window's newest, so the window's top stands in for them: `started_at`
+    /// (the walk began below `started_at + 1`, an exclusive bound), or just
+    /// under a lower `--before`. Every post up to that point existed when the
+    /// walk began, so it is all archived once the job completes; posts
+    /// published later sit above it, where the next incremental run looks.
+    pub fn newest_observed_seed(&self) -> Option<PostTimestamp> {
+        if self.newest_observed.is_some() || self.before_cursor.is_none() {
+            return self.newest_observed;
+        }
+        let window_top = self
+            .before
+            .map_or(self.started_at, |before| before.saturating_sub(1));
+        Some(window_top.min(self.started_at))
     }
 
     pub fn load(path: &Utf8Path) -> anyhow::Result<Self> {
@@ -317,6 +336,53 @@ mod tests {
         let job: JobState = serde_json::from_str(json).unwrap();
         assert_eq!(job.before_cursor, Some(90));
         assert_eq!(job.last_page_ids, vec!["7"]);
+    }
+
+    #[test]
+    fn legacy_cursor_job_seeds_newest_observed_from_window_top() {
+        // archivr 0.6.0/0.6.1 committed a cursor but no `newest_observed`.
+        // The remainder a resumed run fetches is the oldest part of the
+        // window, so seeding from it would record a mark years too old.
+        let json = r#"{"blog_name":"b","started_at":1000,"before_cursor":400,"last_page_ids":["7"],"json":true,"save_images":true}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), Some(1000));
+    }
+
+    #[test]
+    fn legacy_cursor_job_seed_stays_below_a_before_bound() {
+        // `before` is exclusive and caps the window top below `started_at`;
+        // posts at or above it were never fetched, so the seed must not
+        // claim them.
+        let json = r#"{"blog_name":"b","started_at":1000,"before_cursor":400,"before":600}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), Some(599));
+
+        // A `before` beyond the start still leaves posts published after
+        // the first fetch out of the walk.
+        let json = r#"{"blog_name":"b","started_at":1000,"before_cursor":400,"before":5000}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), Some(1000));
+    }
+
+    #[test]
+    fn recorded_newest_observed_seeds_unchanged() {
+        let json =
+            r#"{"blog_name":"b","started_at":1000,"before_cursor":400,"newest_observed":950}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), Some(950));
+    }
+
+    #[test]
+    fn job_without_cursor_seeds_nothing() {
+        // A new job, or a pre-cursor job file, walks the window from the top
+        // and observes the newest posts itself.
+        let json = r#"{"blog_name":"b","started_at":1000}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), None);
+
+        let json = r#"{"blog_name":"b","offset":120,"started_at":1000,"json":true}"#;
+        let job: JobState = serde_json::from_str(json).unwrap();
+        assert_eq!(job.newest_observed_seed(), None);
     }
 
     #[test]
