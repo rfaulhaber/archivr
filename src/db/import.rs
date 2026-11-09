@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use crabrave::handlers::blog::Post;
 use serde_json::Value;
@@ -30,7 +30,8 @@ pub struct ImportSummary {
     /// Draft, queued, submitted, or liked copies of posts the database already
     /// holds as published.
     pub skipped_published: u64,
-    /// Files that couldn't be loaded, or whose post belongs to another blog.
+    /// Files that couldn't be loaded, or whose post belongs to another blog or
+    /// has an id that isn't a number.
     pub failed: u64,
     /// The first [`MAX_REPORTED_FAILURES`] failures, with the reason.
     pub failures: Vec<(Utf8PathBuf, String)>,
@@ -116,9 +117,10 @@ fn is_post_id(name: &str) -> bool {
 /// Builds or updates `archive.db` in `dir` from the `--json` post files there.
 ///
 /// Files are loaded one at a time, since a real archive can hold over a
-/// hundred thousand. A file that won't load, or a post of another blog, is
-/// counted in the summary instead of aborting the run. A database error does
-/// abort it: SQLite may have rolled back the open transaction itself.
+/// hundred thousand. A file that won't load, a post of another blog, or a post
+/// whose id isn't a number is counted in the summary instead of aborting the
+/// run. A database error does abort it: SQLite may have rolled back the open
+/// transaction itself.
 pub fn import_json_archive(dir: &Utf8Path, quiet: bool) -> anyhow::Result<ImportSummary> {
     let files = find_post_files(dir)?;
     if files.is_empty() {
@@ -126,7 +128,7 @@ pub fn import_json_archive(dir: &Utf8Path, quiet: bool) -> anyhow::Result<Import
     }
     let blog_name = match ArchiveDb::stored_blog_name(dir)? {
         Some(name) => name,
-        None => root_blog_name(&files).ok_or_else(|| no_archive_error(dir))?,
+        None => root_blog_name(dir, &files)?,
     };
 
     let mut db = ArchiveDb::open(dir, &blog_name)?;
@@ -146,6 +148,14 @@ pub fn import_json_archive(dir: &Utf8Path, quiet: bool) -> anyhow::Result<Import
                         "post belongs to blog `{}`, not `{blog_name}`",
                         post.blog_name
                     ),
+                );
+            }
+            // `write_post` would fail on this id, and its errors abort the
+            // import, so it is counted here with the other bad files.
+            Ok((post, _)) if post.id.parse::<i64>().is_err() => {
+                summary.record_failure(
+                    path,
+                    format!("post id `{}` is not a 64-bit integer", post.id),
                 );
             }
             Ok((post, notes)) => {
@@ -179,13 +189,33 @@ pub fn import_json_archive(dir: &Utf8Path, quiet: bool) -> anyhow::Result<Import
     Ok(summary)
 }
 
-/// The `blog_name` of the first root-level post file that loads.
-fn root_blog_name(files: &[(Collection, Utf8PathBuf)]) -> Option<String> {
-    files
+/// The `blog_name` of the first root-level post file that loads. Only root
+/// files name the archive's own blog: a like is another blog's post.
+fn root_blog_name(dir: &Utf8Path, files: &[(Collection, Utf8PathBuf)]) -> anyhow::Result<String> {
+    let mut root_files = 0_usize;
+    let mut first_failure = None;
+    for (_, path) in files
         .iter()
         .filter(|(collection, _)| *collection == Collection::Posts)
-        .find_map(|(_, path)| load_post_file(path).ok())
-        .map(|(post, _)| post.blog_name)
+    {
+        root_files += 1;
+        match load_post_file(path) {
+            Ok((post, _)) => return Ok(post.blog_name),
+            Err(err) if first_failure.is_none() => first_failure = Some((path, err)),
+            Err(_) => {}
+        }
+    }
+    match first_failure {
+        Some((path, err)) => bail!(
+            "found {root_files} post files at the root of {dir}, but none could be read; \
+             the first failed with: {path}: {err:#}"
+        ),
+        None => bail!(
+            "found {} post files in {dir}, but none at its root, which is where the blog \
+             name comes from",
+            files.len()
+        ),
+    }
 }
 
 fn no_archive_error(dir: &Utf8Path) -> anyhow::Error {
@@ -459,6 +489,31 @@ mod tests {
     }
 
     #[test]
+    fn import_counts_a_post_whose_id_is_not_a_number() {
+        let dir = TempDir::new("archivr-test-import-bad-id");
+        write_file(dir.path(), "1.json", &text_post("1", "alpha"), None);
+        // The file name is a valid id; the post inside it is not.
+        write_file(dir.path(), "2.json", &text_post("abc", "beta"), None);
+
+        let summary = import_json_archive(dir.path(), true).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.failed, 1);
+        assert!(summary.failures[0].0.as_str().ends_with("2.json"));
+        assert!(
+            summary.failures[0].1.contains("abc"),
+            "{:?}",
+            summary.failures
+        );
+        assert_eq!(
+            ArchiveDb::open(dir.path(), "test")
+                .unwrap()
+                .post_count()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn import_reports_only_the_first_failures() {
         let dir = TempDir::new("archivr-test-import-failure-cap");
         write_file(dir.path(), "1.json", &text_post("1", "alpha"), None);
@@ -607,7 +662,10 @@ mod tests {
     fn import_of_empty_dir_errors() {
         let dir = TempDir::new("archivr-test-import-empty");
         let err = import_json_archive(dir.path(), true).unwrap_err();
-        assert!(format!("{err:#}").contains("--json"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("no --json post files found"),
+            "{err:#}"
+        );
         assert!(!ArchiveDb::exists(dir.path()));
     }
 
@@ -617,8 +675,24 @@ mod tests {
         write_text(dir.path(), "1.json", "garbage");
         write_file(dir.path(), "likes/2.json", &text_post("2", "alpha"), None);
 
-        let err = import_json_archive(dir.path(), true).unwrap_err();
-        assert!(format!("{err:#}").contains("--json"), "{err:#}");
+        let message = format!("{:#}", import_json_archive(dir.path(), true).unwrap_err());
+        assert!(
+            message.contains("found 1 post files at the root of"),
+            "{message}"
+        );
+        assert!(message.contains("none could be read"), "{message}");
+        assert!(message.contains("1.json: invalid JSON"), "{message}");
+        assert!(!ArchiveDb::exists(dir.path()));
+    }
+
+    #[test]
+    fn import_errors_when_only_collections_hold_post_files() {
+        let dir = TempDir::new("archivr-test-import-no-root");
+        write_file(dir.path(), "drafts/3.json", &text_post("3", "alpha"), None);
+
+        let message = format!("{:#}", import_json_archive(dir.path(), true).unwrap_err());
+        assert!(message.contains("none at its root"), "{message}");
+        assert!(!message.contains("no --json post files"), "{message}");
         assert!(!ArchiveDb::exists(dir.path()));
     }
 }

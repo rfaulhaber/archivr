@@ -159,6 +159,11 @@ async fn run(args: Args) -> anyhow::Result<u64> {
 /// Builds `archive.db` from the `--json` archive in `dir`, returning how many
 /// posts it wrote.
 fn run_import(dir: &camino::Utf8Path, quiet: bool) -> anyhow::Result<u64> {
+    // Checked first because the lock would otherwise report a bare "failed to
+    // open file" for a mistyped path.
+    if !dir.is_dir() {
+        return Err(anyhow::anyhow!("{dir} is not a directory"));
+    }
     // Held until the import ends, so it can't interleave with a backup into the
     // same directory.
     let _lock = lock_output_dir(dir)?;
@@ -2356,6 +2361,19 @@ mod tests {
 
         assert_eq!(run_import(dir.path(), true).unwrap(), 1);
         assert_eq!(committed_posts(dir.path()), 1);
+    }
+
+    #[test]
+    fn import_rejects_a_path_that_is_not_a_directory() {
+        let dir = TempDir::new("archivr-test-import-not-a-dir");
+        let file = dir.path().join("123.json");
+        fs_err::write(&file, "{}").unwrap();
+
+        for path in [dir.path().join("missing"), file] {
+            let err = run_import(&path, true).unwrap_err();
+            assert_eq!(err.to_string(), format!("{path} is not a directory"));
+        }
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[test]
