@@ -35,11 +35,11 @@ CREATE TABLE posts (
     slug            TEXT,
     summary         TEXT,
     note_count      INTEGER,
-    is_reblog       INTEGER NOT NULL,      -- reblogged_from_name IS NOT NULL (same rule as --no-reblogs)
-    parent_blog     TEXT,                  -- reblogged_from_name
-    parent_post_url TEXT,                  -- reblogged_from_url
-    root_blog       TEXT,                  -- reblogged_root_name
-    root_post_url   TEXT,                  -- reblogged_root_url
+    is_reblog       INTEGER NOT NULL,      -- 1 when reblogged_from_name, parent_post_url, or a trail is present
+    parent_blog     TEXT,                  -- reblogged_from_name, else derived from the parent URL / trail
+    parent_post_url TEXT,                  -- reblogged_from_url, else the post's parent_post_url
+    root_blog       TEXT,                  -- reblogged_root_name, else the root trail item's blog
+    root_post_url   TEXT,                  -- reblogged_root_url, NULL when the API doesn't send it
     body            TEXT NOT NULL,         -- plain text of the post's own content
     trail_text      TEXT NOT NULL,         -- plain text of all trail items, blank-line separated
     tags            TEXT NOT NULL,         -- newline-joined, for FTS
@@ -64,7 +64,7 @@ CREATE TABLE trail (
     position       INTEGER NOT NULL,       -- trail order as returned (root first)
     blog           TEXT,
     source_post_id TEXT,
-    is_root        INTEGER NOT NULL,
+    is_root        INTEGER NOT NULL,       -- is_root_item or the post's root id, else the first item
     text           TEXT NOT NULL,
     PRIMARY KEY (post_id, position)
 );
