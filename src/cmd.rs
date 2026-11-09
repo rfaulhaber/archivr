@@ -28,10 +28,9 @@ const POST_TYPES: [&str; 8] = [
 /// Every argument id except `sqlite_from_json` and `quiet`: the flags that
 /// configure a backup, none of which mean anything to the offline import.
 /// `--quiet` stays allowed because the import has progress output to suppress.
+/// The credentials are left out too: the environment can supply them, and clap counts that as present.
 const BACKUP_ARG_IDS: &[&str] = &[
     "blog_names",
-    "consumer_key",
-    "consumer_secret",
     "config_file",
     "resume",
     "incremental",
@@ -640,6 +639,24 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_from_json_accepts_credentials() {
+        // The import never authenticates, but the credentials may be set in the
+        // environment, which clap counts as present, so they can't conflict.
+        assert!(
+            Args::try_parse_from([
+                "archivr",
+                "--sqlite-from-json",
+                "dir",
+                "--consumer-key",
+                "k",
+                "--consumer-secret",
+                "s",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn backup_arg_ids_cover_every_other_argument() {
         use clap::CommandFactory as _;
         let command = Args::command();
@@ -648,7 +665,17 @@ mod tests {
             .map(|a| a.get_id().as_str())
             .collect();
         for id in &ids {
-            if matches!(*id, "help" | "version" | "sqlite_from_json" | "quiet") {
+            // The credentials can come from the environment, so the import
+            // must accept them (and ignore them).
+            if matches!(
+                *id,
+                "help"
+                    | "version"
+                    | "sqlite_from_json"
+                    | "quiet"
+                    | "consumer_key"
+                    | "consumer_secret"
+            ) {
                 continue;
             }
             assert!(
