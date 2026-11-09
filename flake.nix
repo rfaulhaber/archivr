@@ -59,6 +59,10 @@
           default = self'.packages.${projectName};
         };
 
+        # `nix flake check` only evaluates packages; listing the package here
+        # makes it build (and run the test suite in the sandbox) as well.
+        checks.${projectName} = self'.packages.${projectName};
+
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust-bin.stable.latest.default
