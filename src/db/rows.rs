@@ -379,14 +379,24 @@ pub fn blocks_text(blocks: &[ContentBlock]) -> String {
     for block in blocks {
         match block {
             ContentBlock::Text { text, .. } => lines.push(text),
+            // The URL and site name are searchable too: a link post can be
+            // nothing but a bare link block.
             ContentBlock::Link {
-                title, description, ..
-            } => lines.extend(
-                [title, description]
-                    .into_iter()
-                    .flatten()
-                    .map(String::as_str),
-            ),
+                url,
+                title,
+                description,
+                author,
+                site_name,
+                ..
+            } => {
+                lines.extend(
+                    [title, description, site_name, author]
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str),
+                );
+                lines.push(url);
+            }
             ContentBlock::Poll {
                 question, answers, ..
             } => {
@@ -404,7 +414,14 @@ pub fn blocks_text(blocks: &[ContentBlock]) -> String {
                     .flatten()
                     .map(String::as_str),
             ),
-            ContentBlock::Image { caption, .. } => lines.extend(caption.as_deref()),
+            ContentBlock::Image {
+                alt_text, caption, ..
+            } => lines.extend(
+                [alt_text, caption]
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            ),
             ContentBlock::Paywall { title, text, .. } => {
                 lines.extend([title, text].into_iter().flatten().map(String::as_str));
             }
@@ -610,7 +627,60 @@ mod tests {
         });
         assert_eq!(
             blocks_text(&post.content),
-            "Link title\nLink description\nWhich?\nThis\nThat\nSong\nArtist\nAlbum"
+            "Link title\nLink description\nhttps://example.com\nWhich?\nThis\nThat\nSong\nArtist\nAlbum"
+        );
+    }
+
+    /// A link block as archived from a real post: a `site_name` and a `url`
+    /// with no description.
+    #[test]
+    fn link_site_name_and_url_are_searchable() {
+        let post = post_with(|v| {
+            v["content"] = json!([
+                {
+                    "type": "link",
+                    "url": "https://archive.is/dl0Lv",
+                    "title": "Shale chiefs warn Trump",
+                    "site_name": "archive.is",
+                    "author": "A. Writer",
+                },
+                text("US shale bosses have warned"),
+            ]);
+        });
+        assert_eq!(
+            blocks_text(&post.content),
+            "Shale chiefs warn Trump\narchive.is\nA. Writer\nhttps://archive.is/dl0Lv\nUS shale bosses have warned"
+        );
+    }
+
+    /// A reblogged embed whose only content is a bare link block; without its
+    /// URL the trail item would have no text at all.
+    #[test]
+    fn bare_link_block_contributes_its_url() {
+        let post = post_with(|v| {
+            v["trail"] = json!([trail_item(
+                "a",
+                "1",
+                json!([{"type": "link", "url": "https://vine.co/v/OTFjhQb5tdz/embed/simple"}])
+            )]);
+        });
+        assert_eq!(
+            rows_for(&post).post.trail_text,
+            "https://vine.co/v/OTFjhQb5tdz/embed/simple"
+        );
+    }
+
+    #[test]
+    fn image_alt_text_is_searchable() {
+        let post = post_with(|v| {
+            let mut img = image(&[("https://cdn.example/a.jpg", true)]);
+            img["alt_text"] = json!("Photo of a BlackBerry Curve on a car dashboard.");
+            img["caption"] = json!("Curve");
+            v["trail"] = json!([trail_item("a", "1", json!([img]))]);
+        });
+        assert_eq!(
+            rows_for(&post).post.trail_text,
+            "Photo of a BlackBerry Curve on a car dashboard.\nCurve"
         );
     }
 
@@ -633,10 +703,8 @@ mod tests {
     #[test]
     fn other_blocks_contribute_nothing() {
         let post = post_with(|v| {
-            let mut img = image(&[("https://cdn.example/a.jpg", true)]);
-            img["alt_text"] = json!("alt only");
             v["content"] = json!([
-                img,
+                image(&[("https://cdn.example/a.jpg", true)]),
                 {"type": "video", "url": "https://youtu.be/x"},
                 {"type": "futureblock", "text": "unmodeled"},
             ]);
