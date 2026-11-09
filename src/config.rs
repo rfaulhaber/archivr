@@ -56,6 +56,7 @@ pub struct ResolvedConfig {
     pub skip: Option<u64>,
     pub save_avatar: bool,
     pub media_list: bool,
+    pub sqlite: bool,
     /// Explicit post ids to fetch instead of paginating (`--post-id` plus the
     /// contents of `--id-file`). Non-empty selects single-post mode.
     pub post_ids: Vec<String>,
@@ -138,6 +139,7 @@ impl ResolvedConfig {
                     skip: args.skip,
                     save_avatar: args.save_avatar,
                     media_list: args.media_list,
+                    sqlite: args.sqlite,
                     post_ids: post_ids.clone(),
                     wayback: args.wayback,
                     no_embeds: args.no_embeds,
@@ -262,6 +264,7 @@ mod tests {
             skip: None,
             save_avatar: false,
             media_list: false,
+            sqlite: false,
             post_id: Vec::new(),
             id_file: None,
             wayback: false,

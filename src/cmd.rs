@@ -214,6 +214,12 @@ pub struct Args {
 
     #[arg(
         long,
+        help = "Write archive.db, a SQLite database of archived posts; once it exists, every backup into the directory keeps it updated"
+    )]
+    pub sqlite: bool,
+
+    #[arg(
+        long,
         value_name = "IDS",
         value_delimiter = ',',
         value_parser = non_empty_string,
@@ -331,6 +337,7 @@ impl std::fmt::Debug for Args {
             .field("skip", &self.skip)
             .field("save_avatar", &self.save_avatar)
             .field("media_list", &self.media_list)
+            .field("sqlite", &self.sqlite)
             .field("post_id", &self.post_id)
             .field("id_file", &self.id_file)
             .field("wayback", &self.wayback)
@@ -553,6 +560,12 @@ mod tests {
         assert!(args.media_list);
         assert!(args.wayback);
         assert!(args.no_embeds);
+    }
+
+    #[test]
+    fn sqlite_flag_parses() {
+        assert!(!Args::parse_from(["archivr", "blog"]).sqlite);
+        assert!(Args::parse_from(["archivr", "blog", "--sqlite"]).sqlite);
     }
 
     #[test]

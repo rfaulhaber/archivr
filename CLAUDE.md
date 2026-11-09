@@ -41,6 +41,8 @@ All Rust sources live under `src/`:
 - `src/media.rs` - Media collection/download/URL-rewriting into the shared `media/{images,videos,audio}/` stores, Wayback Machine fallback, the yt-dlp bridge for external embeds, `media-list.jsonl` writer
 - `src/template.rs` - minijinja rendering: default template, NPF block rendering, HTML escaping/URL sanitizing, `--no-embeds` stripping
 - `src/index.rs` - `ArchiveIndex` (`.archivr-index.json` metadata and `index.html` generation)
+- `src/db.rs` - `ArchiveDb` (`archive.db`: schema and version check, `write_post` upserts with the full-text index kept in sync by triggers; rows accumulate in a transaction that `commit` ends, and a page's commit must precede its `job.save`)
+- `src/db/rows.rs` - `build_rows`: turns an archived `Post` into the rows `archive.db` stores (plain-text extraction, trail roots, media variant and path normalization)
 - `src/notes.rs` - Notes fetching with `_links` cursor pagination
 - `src/fsutil.rs` - Atomic writes (temp + rename), mtime stamping, the output-directory lock
 

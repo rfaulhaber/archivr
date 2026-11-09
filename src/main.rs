@@ -4,9 +4,13 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use archivr::{
-    ArchiveIndex, ArchivrError, Args, BackupState, JobState, PostNotes, PostRenderer,
+    ArchiveDb, ArchiveIndex, ArchivrError, Args, BackupState, JobState, PostNotes, PostRenderer,
     PostTimestamp, ResolvedConfig, api,
     auth::authenticate,
+    db::{
+        DB_FILE_NAME,
+        rows::{Collection, PostRecord, RowSource},
+    },
     fsutil::{lock_output_dir, set_mtime, write_atomic},
     media::{
         ExternalVideoDownloader, MAX_CONCURRENT_DOWNLOADS, MediaListWriter, MediaSelection,
@@ -419,6 +423,25 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         None
     };
 
+    // An existing file keeps the database current whatever flags this run
+    // has, so a flagless ad hoc run or a resumed job can't let it fall behind.
+    let mut database = if config.sqlite || ArchiveDb::exists(&config.output_dir) {
+        let db = ArchiveDb::open(&config.output_dir, &config.blog_name)?;
+        if db.created() && database_coverage_is_partial(&config, resuming_existing_job) {
+            // Not gated on --quiet: a database that looks complete but isn't
+            // would mislead every query run against it.
+            say!(
+                "Note: {} was just created, but this run covers only part of the blog, so \
+                 the database holds only the posts it archives. Run a full backup (without \
+                 --incremental, --after, --before, --count, --skip or --post-id) to fill it.",
+                ArchiveDb::path(&config.output_dir)
+            )?;
+        }
+        Some(db)
+    } else {
+        None
+    };
+
     // Probed once per run so a missing yt-dlp prints one notice, not one per
     // batch.
     let external_video = if config.save_video_external {
@@ -450,6 +473,7 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         external_video: external_video.as_ref(),
         archive_index: archive_index.as_mut(),
         media_list: media_list.as_mut(),
+        database: database.as_mut(),
     };
 
     let mut total_archived: u64;
@@ -458,6 +482,11 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         total_archived = run_single_posts(session, &config, &mut sinks).await?;
     } else {
         let outcome = run_backup(session, &config, &mut sinks, &mut job, &job_file).await?;
+        // The `--count` break leaves the loop before the page-end commit, and
+        // the incremental mark must not get ahead of the rows.
+        if let Some(db) = sinks.database.as_deref_mut() {
+            db.commit()?;
+        }
         total_archived = outcome.archived;
         save_backup_state(&config, &state_file, prior_state.as_ref(), outcome.newest_observed)?;
     }
@@ -485,6 +514,12 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         if !config.quiet {
             say!("Wrote index.html ({} posts indexed)", idx.entries.len())?;
         }
+    }
+
+    if !config.quiet
+        && let Some(db) = database.as_ref()
+    {
+        say!("Updated {DB_FILE_NAME} ({} posts)", db.post_count()?)?;
     }
 
     // Single-post mode never ran the main window, so a job file found here
@@ -678,6 +713,51 @@ struct OutputSinks<'a> {
     external_video: Option<&'a ExternalVideoDownloader>,
     archive_index: Option<&'a mut ArchiveIndex>,
     media_list: Option<&'a mut MediaListWriter>,
+    database: Option<&'a mut ArchiveDb>,
+}
+
+/// Whether this run leaves posts of the blog out of a database it just
+/// created, so the database would be mistaken for the whole archive.
+fn database_coverage_is_partial(config: &ResolvedConfig, resuming: bool) -> bool {
+    config.after.is_some()
+        || config.before.is_some()
+        || config.count.is_some()
+        || config.skip.is_some()
+        || !config.post_ids.is_empty()
+        || resuming
+}
+
+/// Ends a page of the main window. The database commits first so the job file,
+/// and the index saved in step with it, never get ahead of rows that aren't
+/// durable: a crash between the steps re-fetches the page on `--resume` and
+/// upserts it again, which is harmless.
+fn persist_page(
+    database: Option<&mut ArchiveDb>,
+    job: &JobState,
+    job_file: &camino::Utf8Path,
+    index: Option<&ArchiveIndex>,
+    index_path: &camino::Utf8Path,
+) -> anyhow::Result<()> {
+    if let Some(db) = database {
+        db.commit()?;
+    }
+    job.save(job_file)?;
+    // Persisted in step with the job file so an interrupt loses no index
+    // entries for posts already on disk: a later --resume skips those posts
+    // and could never re-record them.
+    if let Some(idx) = index {
+        idx.save(index_path)?;
+    }
+    Ok(())
+}
+
+/// The archived file's path relative to the output directory, the form the
+/// database stores.
+fn archive_relative_path(output_dir: &camino::Utf8Path, file: &camino::Utf8Path) -> String {
+    file.strip_prefix(output_dir)
+        .unwrap_or(file)
+        .as_str()
+        .to_owned()
 }
 
 async fn run_backup(
@@ -887,13 +967,16 @@ async fn run_backup(
                     w.record(post)?;
                 }
 
+                // The database records the URLs as the API returned them, which
+                // rewriting replaces with local paths.
+                let original = post;
                 let post: Cow<'_, Post> = if url_map.is_empty() {
                     Cow::Borrowed(post)
                 } else {
                     rewrite_post_media_urls(post, &url_map)
                 };
 
-                if config.json {
+                let file_path = if config.json {
                     // JSON mode: write immediately, no navigation
                     let content = render_json(&post, post_notes.as_ref())?;
                     let output_file = if config.directories {
@@ -908,6 +991,7 @@ async fn run_backup(
                     write_atomic(&output_file, content.as_bytes())?;
                     stamp_mtime(&output_file, post.timestamp);
                     log::debug!("saved post {} to {}", post.id, output_file);
+                    archive_relative_path(&config.output_dir, &output_file)
                 } else {
                     // HTML mode: buffer for nav link injection
                     let r = sinks.renderer
@@ -930,6 +1014,7 @@ async fn run_backup(
                     };
 
                     let current_href = post_relative_href(&post.id, config.directories);
+                    let file_path = archive_relative_path(&config.output_dir, &output_file);
 
                     // Persist this post before the batch's offset can be saved past
                     // it: the placeholder is an HTML comment, so the on-disk copy
@@ -957,6 +1042,18 @@ async fn run_backup(
                         relative_href: current_href,
                         timestamp: post.timestamp,
                     });
+                    file_path
+                };
+
+                if let Some(db) = sinks.database.as_deref_mut() {
+                    db.write_post(&PostRecord {
+                        post: original,
+                        notes: post_notes.as_ref(),
+                        collection: Collection::Posts,
+                        file_path: Some(&file_path),
+                        url_map: &url_map,
+                        source: RowSource::Api,
+                    })?;
                 }
 
                 if let Some(idx) = sinks.archive_index.as_deref_mut() {
@@ -1003,13 +1100,13 @@ async fn run_backup(
                 job.last_post_href = Some(b.relative_href.clone());
                 job.last_post_file = Some(b.output_file.clone());
             }
-            job.save(job_file)?;
-            // Persisted in step with the job file so an interrupt loses no
-            // index entries for posts already on disk: a later --resume skips
-            // those posts and could never re-record them.
-            if let Some(idx) = sinks.archive_index.as_deref_mut() {
-                idx.save(&index_metadata_path)?;
-            }
+            persist_page(
+                sinks.database.as_deref_mut(),
+                job,
+                job_file,
+                sinks.archive_index.as_deref(),
+                &index_metadata_path,
+            )?;
 
             if !config.quiet {
                 match reported_total {
@@ -1118,6 +1215,7 @@ async fn run_single_posts(
             w.record(&post)?;
         }
 
+        let original = &post;
         let post: Cow<'_, Post> = if url_map.is_empty() {
             Cow::Borrowed(&post)
         } else {
@@ -1144,6 +1242,18 @@ async fn run_single_posts(
         };
         write_atomic(&output_file, content.as_bytes())?;
         stamp_mtime(&output_file, post.timestamp);
+
+        if let Some(db) = sinks.database.as_deref_mut() {
+            db.write_post(&PostRecord {
+                post: original,
+                notes: post_notes.as_ref(),
+                collection: Collection::Posts,
+                file_path: Some(&archive_relative_path(&config.output_dir, &output_file)),
+                url_map: &url_map,
+                source: RowSource::Api,
+            })?;
+            db.commit()?;
+        }
 
         if let Some(idx) = sinks.archive_index.as_deref_mut() {
             idx.record(&post);
@@ -1295,6 +1405,15 @@ impl SpecialKind {
             Self::Queue => config.queue,
             Self::Submissions => config.submissions,
             Self::Likes => config.likes,
+        }
+    }
+
+    fn collection(self) -> Collection {
+        match self {
+            Self::Drafts => Collection::Drafts,
+            Self::Queue => Collection::Queue,
+            Self::Submissions => Collection::Submissions,
+            Self::Likes => Collection::Likes,
         }
     }
 
@@ -1484,6 +1603,7 @@ async fn backup_special(
                 w.record(post)?;
             }
 
+            let original = post;
             let post: Cow<'_, Post> = if url_map.is_empty() {
                 Cow::Borrowed(post)
             } else {
@@ -1513,7 +1633,22 @@ async fn backup_special(
             };
             write_atomic(&output_file, content.as_bytes())?;
             stamp_mtime(&output_file, post.timestamp);
+
+            if let Some(db) = sinks.database.as_deref_mut() {
+                db.write_post(&PostRecord {
+                    post: original,
+                    notes: None,
+                    collection: kind.collection(),
+                    file_path: Some(&archive_relative_path(&config.output_dir, &output_file)),
+                    url_map: &url_map,
+                    source: RowSource::Api,
+                })?;
+            }
             archived += 1;
+        }
+
+        if let Some(db) = sinks.database.as_deref_mut() {
+            db.commit()?;
         }
 
         for post in &posts {
@@ -1910,5 +2045,165 @@ mod tests {
         assert_eq!(value["notes"]["notes"][0]["blog_name"], "liker");
         // The post's own fields are still present alongside the notes.
         assert_eq!(value["id"], "123");
+    }
+
+    /// A scratch directory removed on drop, so a failed assertion leaves
+    /// nothing behind. Pid-suffixed so concurrent test binaries sharing the
+    /// system temp dir can't collide on fixed names.
+    struct TempDir(camino::Utf8PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let tmp = std::env::temp_dir();
+            let dir = camino::Utf8Path::from_path(&tmp)
+                .unwrap()
+                .join(format!("{}-{name}", std::process::id()));
+            let _ = fs_err::remove_dir_all(&dir);
+            fs_err::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &camino::Utf8Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs_err::remove_dir_all(&self.0);
+        }
+    }
+
+    fn job() -> JobState {
+        serde_json::from_str(r#"{"blog_name":"test","started_at":100}"#).unwrap()
+    }
+
+    fn write_minimal_post(db: &mut ArchiveDb) {
+        db.write_post(&PostRecord {
+            post: &minimal_post(),
+            notes: None,
+            collection: Collection::Posts,
+            file_path: Some("123.json"),
+            url_map: &HashMap::new(),
+            source: RowSource::Api,
+        })
+        .unwrap();
+    }
+
+    /// Posts visible to an independent connection, standing in for `sqlite3`
+    /// reading the file: only committed rows count.
+    fn committed_posts(dir: &camino::Utf8Path) -> i64 {
+        rusqlite::Connection::open(ArchiveDb::path(dir))
+            .unwrap()
+            .query_row("SELECT count(*) FROM posts", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn persist_page_commits_database_before_saving_job() {
+        let dir = TempDir::new("archivr-test-persist-page-order");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        write_minimal_post(&mut db);
+        // Saving the job fails because its directory doesn't exist.
+        let job_file = dir.path().join("missing").join(".archivr-job.json");
+
+        let result = persist_page(
+            Some(&mut db),
+            &job(),
+            &job_file,
+            None,
+            &ArchiveIndex::metadata_path(dir.path()),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(committed_posts(dir.path()), 1);
+    }
+
+    #[test]
+    fn persist_page_saves_job_and_index_once_rows_are_committed() {
+        let dir = TempDir::new("archivr-test-persist-page-all");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        write_minimal_post(&mut db);
+        let job_file = JobState::job_file_path(dir.path());
+        let index = ArchiveIndex::new("test");
+        let index_path = ArchiveIndex::metadata_path(dir.path());
+
+        persist_page(Some(&mut db), &job(), &job_file, Some(&index), &index_path).unwrap();
+
+        assert_eq!(committed_posts(dir.path()), 1);
+        assert!(fs_err::exists(&job_file).unwrap());
+        assert!(fs_err::exists(&index_path).unwrap());
+    }
+
+    #[test]
+    fn persist_page_without_a_database_saves_the_job() {
+        let dir = TempDir::new("archivr-test-persist-page-no-db");
+        let job_file = JobState::job_file_path(dir.path());
+
+        persist_page(
+            None,
+            &job(),
+            &job_file,
+            None,
+            &ArchiveIndex::metadata_path(dir.path()),
+        )
+        .unwrap();
+
+        assert!(fs_err::exists(&job_file).unwrap());
+        assert!(!ArchiveDb::exists(dir.path()));
+    }
+
+    fn resolved(extra: &[&str]) -> ResolvedConfig {
+        let mut argv = vec![
+            "archivr",
+            "blog",
+            "--consumer-key",
+            "k",
+            "--consumer-secret",
+            "s",
+        ];
+        argv.extend_from_slice(extra);
+        let args = Args::try_parse_from(argv).unwrap();
+        ResolvedConfig::from_args(args).unwrap().remove(0)
+    }
+
+    #[test]
+    fn database_coverage_is_partial_cases() {
+        assert!(!database_coverage_is_partial(&resolved(&[]), false));
+        for flags in [
+            ["--after", "2024-01-01"],
+            ["--before", "2024-01-01"],
+            ["--count", "5"],
+            ["--skip", "5"],
+            ["--post-id", "1"],
+        ] {
+            assert!(
+                database_coverage_is_partial(&resolved(&flags), false),
+                "{flags:?}"
+            );
+        }
+        assert!(database_coverage_is_partial(&resolved(&[]), true));
+    }
+
+    #[test]
+    fn archive_relative_path_strips_the_output_directory() {
+        for out in ["/archive/blog", "blog"] {
+            let out = camino::Utf8Path::new(out);
+            assert_eq!(
+                archive_relative_path(out, &out.join("123.json")),
+                "123.json"
+            );
+            assert_eq!(
+                archive_relative_path(out, &out.join("drafts").join("123").join("index.html")),
+                "drafts/123/index.html"
+            );
+        }
+    }
+
+    #[test]
+    fn special_kinds_map_to_their_collection_directories() {
+        for kind in SpecialKind::ALL {
+            assert_eq!(kind.collection().dir_name(), Some(kind.dir_name()));
+        }
     }
 }
