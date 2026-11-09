@@ -78,7 +78,8 @@ pub struct PostRecord<'a> {
     pub post: &'a Post,
     pub notes: Option<&'a PostNotes>,
     pub collection: Collection,
-    /// The archived file, relative to the archive root.
+    /// The archived file, relative to the archive root. The local media paths
+    /// it references are relative to its directory.
     pub file_path: Option<&'a str>,
     /// Remote URL to local path, as returned by `download_batch_media`; empty
     /// for imports, whose posts were rewritten before they were written.
@@ -268,7 +269,7 @@ pub fn build_rows(rec: &PostRecord<'_>) -> anyhow::Result<PostRows> {
         post: post_row,
         tags: post.tags.clone(),
         trail,
-        media: media_rows(post, rec.url_map),
+        media: media_rows(post, rec.url_map, rec.file_path),
         notes: rec.notes.map(note_rows).unwrap_or_default(),
     })
 }
@@ -289,11 +290,16 @@ fn trail_item_post_id(item: &TrailItem) -> Option<&str> {
 }
 
 /// Media rows in document order: the post's own content, then each trail item.
-fn media_rows(post: &Post, url_map: &HashMap<String, String>) -> Vec<MediaRow> {
+fn media_rows(
+    post: &Post,
+    url_map: &HashMap<String, String>,
+    file_path: Option<&str>,
+) -> Vec<MediaRow> {
     let mut rows = Vec::new();
-    push_block_media(&post.content, None, url_map, &mut rows);
+    push_block_media(&post.content, None, url_map, file_path, &mut rows);
     for (index, item) in post.trail.iter().enumerate() {
-        push_block_media(&item.content, Some(row_position(index)), url_map, &mut rows);
+        let trail_position = Some(row_position(index));
+        push_block_media(&item.content, trail_position, url_map, file_path, &mut rows);
     }
     rows
 }
@@ -302,6 +308,7 @@ fn push_block_media(
     blocks: &[ContentBlock],
     trail_position: Option<i64>,
     url_map: &HashMap<String, String>,
+    file_path: Option<&str>,
     rows: &mut Vec<MediaRow>,
 ) {
     for block in blocks {
@@ -325,7 +332,7 @@ fn push_block_media(
         };
         let position = row_position(rows.len());
         let row = if let Some(m) = media.filter(|m| !m.url.is_empty()) {
-            let (url, path) = resolve_media_url(&m.url, url_map);
+            let (url, path) = resolve_media_url(&m.url, url_map, file_path);
             MediaRow {
                 position,
                 trail_position,
@@ -366,13 +373,17 @@ fn push_block_media(
 fn resolve_media_url(
     url: &str,
     url_map: &HashMap<String, String>,
+    file_path: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     if let Some(local) = url_map.get(url) {
-        (Some(url.to_owned()), Some(archive_relative(local)))
+        (
+            Some(url.to_owned()),
+            Some(archive_media_path(local, file_path)),
+        )
     } else if url.starts_with("http://") || url.starts_with("https://") {
         (Some(url.to_owned()), None)
     } else {
-        (None, Some(archive_relative(url)))
+        (None, Some(archive_media_path(url, file_path)))
     }
 }
 
@@ -470,8 +481,9 @@ pub fn blocks_text(blocks: &[ContentBlock]) -> String {
     lines.join("\n")
 }
 
-/// Reduces legacy HTML to plain text: tags are dropped, `<br>`, `</p>`, and
-/// `</div>` become newlines, and character references are decoded.
+/// Reduces legacy HTML to plain text: tags are dropped, `<br>` and the closing
+/// tags of block elements (`</p>`, `</li>`, `</blockquote>`, ...) become
+/// newlines, and character references are decoded.
 pub fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut rest = html;
@@ -501,6 +513,21 @@ pub fn strip_html(html: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Block elements whose closing tag ends a line of text.
+const LINE_ENDING_BLOCKS: [&str; 11] = [
+    "p",
+    "div",
+    "li",
+    "blockquote",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "tr",
+];
+
 /// Whether a tag (the text between `<` and `>`) ends a line of text.
 fn tag_breaks_line(tag: &str) -> bool {
     let closing = tag.starts_with('/');
@@ -509,7 +536,10 @@ fn tag_breaks_line(tag: &str) -> bool {
         .find(|c: char| !c.is_ascii_alphanumeric())
         .unwrap_or(name.len())];
     name.eq_ignore_ascii_case("br")
-        || (closing && (name.eq_ignore_ascii_case("p") || name.eq_ignore_ascii_case("div")))
+        || (closing
+            && LINE_ENDING_BLOCKS
+                .iter()
+                .any(|block| name.eq_ignore_ascii_case(block)))
 }
 
 /// Decodes the character reference at the start of `s` (which begins with `&`),
@@ -578,6 +608,36 @@ fn parse_post_url(url: &str) -> Option<PostUrl<'_>> {
         blog,
         post_id: post_id.filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())),
     })
+}
+
+/// Resolves a local media path, as written in the post file at `file_path`, to
+/// a path relative to the archive root. Resolving against the file's directory
+/// keeps layouts that store media beside the post, like the per-post `media/`
+/// directories of older `--directories` archives, pointing at the real file.
+/// Without a file path, or when the path climbs out of the archive, it falls
+/// back to [`archive_relative`].
+fn archive_media_path(path: &str, file_path: Option<&str>) -> String {
+    file_path
+        .and_then(|file| resolve_beside(file, path))
+        .unwrap_or_else(|| archive_relative(path))
+}
+
+/// `path` resolved against the directory holding `file`, with `.` and `..`
+/// segments folded away; `None` when it climbs above the archive root.
+fn resolve_beside(file: &str, path: &str) -> Option<String> {
+    let mut segments: Vec<&str> = file.split('/').collect();
+    // The file's own name; what remains is its directory.
+    segments.pop();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            name => segments.push(name),
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
 }
 
 /// Strips the `../` depth prefixes archived post files use to reach the shared
@@ -839,6 +899,21 @@ mod tests {
     }
 
     #[test]
+    fn strip_html_breaks_lines_after_block_elements() {
+        assert_eq!(
+            strip_html(
+                "<ul><li>a</li><LI>b</LI></ul><blockquote>c</blockquote>\
+                 <h1>d</h1><h6>e</h6><table><tr><td>f</td><td>g</td></tr><tr><td>h</td></tr></table>"
+            ),
+            "a\nb\nc\nd\ne\nfg\nh"
+        );
+        // Only the closing tag ends the line; an opening one is not a boundary.
+        assert_eq!(strip_html("x<li>y"), "xy");
+        // A tag that merely starts like a block element is not one.
+        assert_eq!(strip_html("a<hr>b<link>c<header>d"), "abcd");
+    }
+
+    #[test]
     fn trail_root_from_reblogged_root_id() {
         let post = post_with(|v| {
             v["reblogged_root_id"] = json!("111");
@@ -898,6 +973,86 @@ mod tests {
         });
         let media = &rows_for(&post).media[0];
         assert_eq!(media.url, None);
+        assert_eq!(media.path.as_deref(), Some("media/images/h_a.jpg"));
+    }
+
+    /// The `path` of the image row a post file at `file_path` gets when it
+    /// writes the image's URL as `written`.
+    fn media_path_in(file_path: &str, written: &str) -> Option<String> {
+        let post = post_with(|v| v["content"] = json!([image(&[(written, true)])]));
+        let record = PostRecord {
+            post: &post,
+            notes: None,
+            collection: Collection::Posts,
+            file_path: Some(file_path),
+            url_map: &HashMap::new(),
+            source: RowSource::JsonImport,
+        };
+        build_rows(&record).unwrap().media.remove(0).path
+    }
+
+    #[test]
+    fn media_paths_resolve_against_the_post_file() {
+        // Every layout archivr writes: the depth prefix matches the file's depth.
+        for (file_path, written) in [
+            ("123.json", "media/images/h_a.jpg"),
+            ("123/index.json", "../media/images/h_a.jpg"),
+            ("drafts/123.json", "../media/images/h_a.jpg"),
+            ("drafts/123/index.json", "../../media/images/h_a.jpg"),
+            ("likes/123/index.html", "../../media/images/h_a.jpg"),
+        ] {
+            assert_eq!(
+                media_path_in(file_path, written).as_deref(),
+                Some("media/images/h_a.jpg"),
+                "{file_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_per_post_media_directory_keeps_its_post_prefix() {
+        assert_eq!(
+            media_path_in("123/index.json", "media/x.jpg").as_deref(),
+            Some("123/media/x.jpg")
+        );
+        assert_eq!(
+            media_path_in("drafts/123/index.json", "./media/x.jpg").as_deref(),
+            Some("drafts/123/media/x.jpg")
+        );
+    }
+
+    #[test]
+    fn media_path_normalizes_inner_segments() {
+        assert_eq!(
+            media_path_in("123/index.json", "../media/../media/images/./h_a.jpg").as_deref(),
+            Some("media/images/h_a.jpg")
+        );
+    }
+
+    #[test]
+    fn media_path_escaping_the_archive_root_is_stripped() {
+        assert_eq!(
+            media_path_in("123.json", "../../media/images/h_a.jpg").as_deref(),
+            Some("media/images/h_a.jpg")
+        );
+    }
+
+    #[test]
+    fn url_map_paths_resolve_against_the_post_file() {
+        let a = "https://64.media.tumblr.com/a.jpg";
+        let post = post_with(|v| v["content"] = json!([image(&[(a, true)])]));
+        let url_map = HashMap::from([(a.to_owned(), "../../media/images/h_a.jpg".to_owned())]);
+        let record = PostRecord {
+            post: &post,
+            notes: None,
+            collection: Collection::Drafts,
+            file_path: Some("drafts/123/index.html"),
+            url_map: &url_map,
+            source: RowSource::Api,
+        };
+
+        let media = build_rows(&record).unwrap().media.remove(0);
+        assert_eq!(media.url.as_deref(), Some(a));
         assert_eq!(media.path.as_deref(), Some("media/images/h_a.jpg"));
     }
 

@@ -226,7 +226,7 @@ fn no_archive_error(dir: &Utf8Path) -> anyhow::Error {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::db::rows::RowSource;
+    use crate::db::rows::{RowSource, build_rows};
     use crate::test_support::post_json;
     use rusqlite::Connection;
     use serde_json::{Value, json};
@@ -611,6 +611,124 @@ mod tests {
             assert_eq!(stored_path.as_deref(), Some(path));
             assert_eq!(url, None);
         }
+    }
+
+    /// Guards against the serialized `Post` drifting from what it deserializes
+    /// from: a field that doesn't survive the round trip through a `--json`
+    /// file would make an imported row differ from the row the backup writes.
+    #[test]
+    fn import_builds_the_same_rows_as_the_backup_sink() {
+        let dir = TempDir::new("archivr-test-import-parity");
+        let image = |url: &str| {
+            json!({
+                "type": "image",
+                "alt_text": "a cat",
+                "media": [{
+                    "url": url,
+                    "type": "image/jpeg",
+                    "width": 640,
+                    "height": 480,
+                    "has_original_dimensions": true,
+                }],
+            })
+        };
+        let (remote, trail_remote) = (
+            "https://64.media.tumblr.com/a.jpg",
+            "https://64.media.tumblr.com/t.jpg",
+        );
+        let original = post_with("1", |v| {
+            v["content"] = json!([{"type": "text", "text": "hello"}, image(remote)]);
+            v["tags"] = json!(["cats", "Art"]);
+            v["note_count"] = json!(7);
+            v["slug"] = json!("a-slug");
+            v["summary"] = json!("a summary");
+            v["state"] = json!("published");
+            v["original_type"] = json!("regular");
+            v["short_url"] = json!("https://tmblr.co/x");
+            v["parent_post_url"] = json!("https://origin.tumblr.com/post/100");
+            v["reblogged_from_name"] = json!("origin");
+            v["reblogged_from_url"] = json!("https://origin.tumblr.com/post/100");
+            v["reblogged_root_id"] = json!("90");
+            v["reblogged_root_name"] = json!("root");
+            v["reblogged_root_url"] = json!("https://root.tumblr.com/post/90");
+            v["trail"] = json!([
+                {
+                    "blog": {"name": "root"},
+                    "post": {"id": "90"},
+                    "content": [{"type": "text", "text": "first"}],
+                },
+                {
+                    "blog": {"name": "origin"},
+                    "post": {"id": "100"},
+                    "content": [{"type": "text", "text": "second"}, image(trail_remote)],
+                },
+            ]);
+        });
+        let notes = PostNotes {
+            total_notes: 2,
+            notes: vec![
+                serde_json::from_value(json!({
+                    "type": "reply",
+                    "timestamp": 100,
+                    "blog_name": "replier",
+                    "reply_text": "nice",
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "type": "reblog",
+                    "timestamp": 200,
+                    "blog_name": "reblogger",
+                    "added_text": "agreed",
+                    "tags": ["x", "y"],
+                }))
+                .unwrap(),
+            ],
+            rollup_notes: Vec::new(),
+        };
+        let url_map = HashMap::from([
+            (remote.to_owned(), "media/images/h_a.jpg".to_owned()),
+            (trail_remote.to_owned(), "media/images/h_t.jpg".to_owned()),
+        ]);
+        let written = crate::media::rewrite_post_media_urls(&original, &url_map);
+        write_file(dir.path(), "1.json", &written, Some(&notes));
+
+        let (loaded, loaded_notes) = load_post_file(&dir.path().join("1.json")).unwrap();
+        let mut from_sink = build_rows(&PostRecord {
+            post: &original,
+            notes: Some(&notes),
+            collection: Collection::Posts,
+            file_path: Some("1.json"),
+            url_map: &url_map,
+            source: RowSource::Api,
+        })
+        .unwrap();
+        let from_file = build_rows(&PostRecord {
+            post: &loaded,
+            notes: loaded_notes.as_ref(),
+            collection: Collection::Posts,
+            file_path: Some("1.json"),
+            url_map: &HashMap::new(),
+            source: RowSource::JsonImport,
+        })
+        .unwrap();
+
+        // The fixture must exercise each table, or equality proves little.
+        assert_eq!(from_file.tags.len(), 2);
+        assert_eq!(from_file.trail.len(), 2);
+        assert_eq!(from_file.notes.len(), 2);
+        let paths: Vec<Option<&str>> = from_file.media.iter().map(|m| m.path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            [Some("media/images/h_a.jpg"), Some("media/images/h_t.jpg")]
+        );
+
+        // A file holds rewritten paths, so the original URL is unknowable, and
+        // the source column says which path built the row.
+        for media in &mut from_sink.media {
+            media.url = None;
+        }
+        from_sink.post.source = RowSource::JsonImport;
+        assert_eq!(from_file, from_sink);
     }
 
     #[test]
