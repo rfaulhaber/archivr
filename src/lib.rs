@@ -15,6 +15,7 @@ pub(crate) mod test_support;
 
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
+pub use db::ArchiveDb;
 pub use index::ArchiveIndex;
 pub use job::JobState;
 pub use notes::PostNotes;
