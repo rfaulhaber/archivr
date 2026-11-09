@@ -168,7 +168,7 @@ pub fn build_rows(rec: &PostRecord<'_>) -> anyhow::Result<PostRows> {
         .with_context(|| format!("post id {:?} is not a 64-bit integer", post.id))?;
 
     let root_id = post.reblogged_root_id.as_deref();
-    let trail: Vec<TrailRow> = post
+    let mut trail: Vec<TrailRow> = post
         .trail
         .iter()
         .enumerate()
@@ -184,6 +184,43 @@ pub fn build_rows(rec: &PostRecord<'_>) -> anyhow::Result<PostRows> {
             }
         })
         .collect();
+    // Posts as archivr fetches them carry no root marker: `reblogged_root_*`
+    // needs `reblog_info`, which archivr doesn't request, and real trail items
+    // arrive with `is_root_item` false. The trail is ordered root first, so
+    // with nothing named the first item is the root; a named root that isn't
+    // in the trail is not guessed at.
+    if root_id.is_none()
+        && let Some(first) = trail.first_mut()
+        && !post.trail.iter().any(|item| item.is_root_item)
+    {
+        first.is_root = true;
+    }
+
+    // The `reblogged_from_*` fields are absent for the same reason, so an
+    // archived reblog survives only as `parent_post_url` and the trail. The
+    // trail ends at the nearest ancestor that added content, which is the
+    // parent unless it reblogged without commenting, so it is the last resort.
+    let parent_post_url = non_empty(post.reblogged_from_url.as_deref())
+        .or_else(|| non_empty(post.parent_post_url.as_deref()));
+    let parent_url = parent_post_url.as_deref().and_then(parse_post_url);
+    // The trail item for the parent post names its blog as Tumblr knows it,
+    // where the URL may carry a custom domain or a private blog's numeric id.
+    let parent_blog = non_empty(post.reblogged_from_name.as_deref())
+        .or_else(|| {
+            let id = parent_url.as_ref()?.post_id?;
+            let item = trail
+                .iter()
+                .find(|t| t.source_post_id.as_deref() == Some(id))?;
+            item.blog.clone()
+        })
+        .or_else(|| parent_url.as_ref().map(|url| url.blog.to_owned()))
+        .or_else(|| trail.last().and_then(|t| t.blog.clone()));
+    let root_blog = non_empty(post.reblogged_root_name.as_deref()).or_else(|| {
+        trail
+            .iter()
+            .find(|t| t.is_root)
+            .and_then(|t| t.blog.clone())
+    });
 
     let trail_text = trail
         .iter()
@@ -212,11 +249,12 @@ pub fn build_rows(rec: &PostRecord<'_>) -> anyhow::Result<PostRows> {
         slug: non_empty(post.slug.as_deref()),
         summary: non_empty(post.summary.as_deref()),
         note_count: i64::try_from(post.note_count).unwrap_or(i64::MAX),
-        // The same test `--no-reblogs` applies.
-        is_reblog: post.reblogged_from_name.is_some(),
-        parent_blog: non_empty(post.reblogged_from_name.as_deref()),
-        parent_post_url: non_empty(post.reblogged_from_url.as_deref()),
-        root_blog: non_empty(post.reblogged_root_name.as_deref()),
+        is_reblog: post.reblogged_from_name.is_some()
+            || parent_post_url.is_some()
+            || !trail.is_empty(),
+        parent_blog,
+        parent_post_url,
+        root_blog,
         root_post_url: non_empty(post.reblogged_root_url.as_deref()),
         body: blocks_text(&post.content),
         trail_text,
@@ -496,6 +534,50 @@ fn decode_entity(s: &str) -> Option<(char, usize)> {
         }
     };
     Some((decoded, end + 1))
+}
+
+/// The blog and post a post URL points at.
+#[derive(Debug, PartialEq, Eq)]
+struct PostUrl<'a> {
+    blog: &'a str,
+    post_id: Option<&'a str>,
+}
+
+/// Reads a post URL in the forms Tumblr returns: a blog subdomain, a custom
+/// domain, or `www.tumblr.com/blog/view/<name>/<id>` and `/blog/<name>?<id>`
+/// for blogs without a working subdomain. A custom domain is the only name
+/// such a URL carries.
+fn parse_post_url(url: &str) -> Option<PostUrl<'_>> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let (blog, post_id) = if host.eq_ignore_ascii_case("www.tumblr.com") {
+        let mut parts = path.strip_prefix("blog/")?.split(['/', '?']);
+        let first = parts.next()?;
+        let blog = if first == "view" {
+            parts.next()?
+        } else {
+            first
+        };
+        (blog, parts.next())
+    } else {
+        let post = path.strip_prefix("post/");
+        let subdomain = bare_blog_name(host);
+        let blog = if subdomain.len() != host.len() {
+            subdomain
+        } else if post.is_some() {
+            // A custom domain names a blog only when the path is a post's.
+            host
+        } else {
+            return None;
+        };
+        (blog, post.and_then(|post| post.split('/').next()))
+    };
+    (!blog.is_empty()).then_some(PostUrl {
+        blog,
+        post_id: post_id.filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())),
+    })
 }
 
 /// Strips the `../` depth prefixes archived post files use to reach the shared
@@ -946,6 +1028,182 @@ mod tests {
             row.root_post_url.as_deref(),
             Some("https://root.tumblr.com/post/1")
         );
+    }
+
+    /// A real 2010 post, reduced: archivr doesn't request `reblog_info`, so
+    /// Tumblr returns the reblog only as `parent_post_url` and a trail whose
+    /// items carry no `is_root_item`, never the `reblogged_*` fields.
+    #[test]
+    fn reblog_is_derived_when_the_api_omits_reblogged_fields() {
+        let post = post_with(|v| {
+            v["blog_name"] = json!("algorithmist");
+            v["original_type"] = json!("quote");
+            v["parent_post_url"] =
+                json!("https://stephenblackpool-deactivated201.tumblr.com/post/2493830667");
+            v["trail"] = json!([{
+                "content": [text("Do not believe in anything simply because you have heard it.")],
+                "blog": {"name": "lamaschingonaa-deactivated20200"},
+                "post": {"id": "2135100365"},
+                "is_root_item": false,
+            }]);
+        });
+        let rows = rows_for(&post);
+        assert!(rows.post.is_reblog);
+        assert_eq!(
+            rows.post.parent_blog.as_deref(),
+            Some("stephenblackpool-deactivated201")
+        );
+        assert_eq!(
+            rows.post.parent_post_url.as_deref(),
+            Some("https://stephenblackpool-deactivated201.tumblr.com/post/2493830667")
+        );
+        assert_eq!(
+            rows.post.root_blog.as_deref(),
+            Some("lamaschingonaa-deactivated20200")
+        );
+        assert_eq!(rows.post.root_post_url, None);
+        assert!(rows.trail[0].is_root);
+    }
+
+    #[test]
+    fn reblog_without_a_trail_still_names_its_parent() {
+        let post = post_with(|v| {
+            v["parent_post_url"] = json!("https://parent.tumblr.com/post/2/a-slug");
+        });
+        let row = rows_for(&post).post;
+        assert!(row.is_reblog);
+        assert_eq!(row.parent_blog.as_deref(), Some("parent"));
+        assert_eq!(row.root_blog, None);
+    }
+
+    #[test]
+    fn trail_alone_marks_a_reblog_and_names_the_nearest_trail_blog() {
+        let post = post_with(|v| {
+            v["trail"] = json!([
+                trail_item("root", "1", json!([text("first")])),
+                trail_item("middle", "2", json!([text("second")])),
+            ]);
+        });
+        let row = rows_for(&post).post;
+        assert!(row.is_reblog);
+        assert_eq!(row.parent_blog.as_deref(), Some("middle"));
+        assert_eq!(row.root_blog.as_deref(), Some("root"));
+        assert_eq!(row.parent_post_url, None);
+    }
+
+    #[test]
+    fn explicit_reblog_fields_win_over_derived_ones() {
+        let post = post_with(|v| {
+            v["parent_post_url"] = json!("https://other.tumblr.com/post/9");
+            v["reblogged_from_name"] = json!("parent");
+            v["reblogged_from_url"] = json!("https://parent.tumblr.com/post/2");
+            v["reblogged_root_name"] = json!("root");
+            v["trail"] = json!([trail_item("elsewhere", "1", json!([]))]);
+        });
+        let row = rows_for(&post).post;
+        assert_eq!(row.parent_blog.as_deref(), Some("parent"));
+        assert_eq!(
+            row.parent_post_url.as_deref(),
+            Some("https://parent.tumblr.com/post/2")
+        );
+        assert_eq!(row.root_blog.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn first_trail_item_is_the_root_only_when_the_source_names_none() {
+        let two_items = || {
+            json!([
+                trail_item("a", "111", json!([])),
+                trail_item("b", "222", json!([])),
+            ])
+        };
+        let roots =
+            |post: &Post| -> Vec<bool> { rows_for(post).trail.iter().map(|t| t.is_root).collect() };
+
+        let unmarked = post_with(|v| v["trail"] = two_items());
+        assert_eq!(roots(&unmarked), [true, false]);
+
+        // A root the trail doesn't contain is not replaced by a guess.
+        let unmatched = post_with(|v| {
+            v["reblogged_root_id"] = json!("999");
+            v["trail"] = two_items();
+        });
+        assert_eq!(roots(&unmatched), [false, false]);
+
+        let flagged = post_with(|v| {
+            let mut second = trail_item("b", "222", json!([]));
+            second["is_root_item"] = json!(true);
+            v["trail"] = json!([trail_item("a", "111", json!([])), second]);
+        });
+        assert_eq!(roots(&flagged), [false, true]);
+    }
+
+    /// A real post reblogged from a custom-domain blog: the URL names the
+    /// domain, the trail item names the blog.
+    #[test]
+    fn parent_blog_prefers_the_trail_item_for_the_parent_post() {
+        let post = post_with(|v| {
+            v["parent_post_url"] = json!(
+                "https://ianbrooks.me/post/3351656837/project-ariel-by-cody-ruch-why-must-you-always"
+            );
+            v["trail"] = json!([
+                trail_item("someone", "3351000000", json!([text("art"),])),
+                trail_item("ianbrooks", "3351656837", json!([text("by Cody Ruch")])),
+            ]);
+        });
+        assert_eq!(
+            rows_for(&post).post.parent_blog.as_deref(),
+            Some("ianbrooks")
+        );
+    }
+
+    #[test]
+    fn parent_blog_falls_back_to_the_url_when_the_trail_lacks_the_parent() {
+        let post = post_with(|v| {
+            v["parent_post_url"] =
+                json!("https://www.tumblr.com/blog/private_4580876076?4286111304");
+            v["trail"] = json!([trail_item("root", "1", json!([text("x")]))]);
+        });
+        assert_eq!(
+            rows_for(&post).post.parent_blog.as_deref(),
+            Some("private_4580876076")
+        );
+    }
+
+    #[test]
+    fn parse_post_url_reads_every_url_shape_tumblr_returns() {
+        let parsed = |url| parse_post_url(url).map(|u| (u.blog, u.post_id));
+        for (url, expected) in [
+            (
+                "https://name.tumblr.com/post/12/slug",
+                Some(("name", Some("12"))),
+            ),
+            ("http://name.tumblr.com/post/12", Some(("name", Some("12")))),
+            ("https://name.tumblr.com/", Some(("name", None))),
+            (
+                "https://www.tumblr.com/blog/view/getlostinthesounds/2543117580",
+                Some(("getlostinthesounds", Some("2543117580"))),
+            ),
+            (
+                "https://www.tumblr.com/blog/private_5746131?2646770726",
+                Some(("private_5746131", Some("2646770726"))),
+            ),
+            (
+                "https://ianbrooks.me/post/2745994191/a-slug",
+                Some(("ianbrooks.me", Some("2745994191"))),
+            ),
+            (
+                "https://name.tumblr.com/post/not-a-number",
+                Some(("name", None)),
+            ),
+            ("https://example.com/about", None),
+            ("https://www.tumblr.com/dashboard", None),
+            ("https://www.tumblr.com/blog/view", None),
+            ("https://www.tumblr.com/post/1", None),
+            ("no scheme", None),
+        ] {
+            assert_eq!(parsed(url), expected, "{url}");
+        }
     }
 
     #[test]

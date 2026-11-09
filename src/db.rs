@@ -815,7 +815,7 @@ mod tests {
                 is_reblog,
                 authors.as_str()
             ),
-            ("7.html", "api", 0, "quokka")
+            ("7.html", "api", 1, "quokka")
         );
         assert_eq!(
             count(&conn, "SELECT count(*) FROM tags WHERE post_id = 7"),
