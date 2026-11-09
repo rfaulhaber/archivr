@@ -6,7 +6,7 @@
 
 use crate::api::ClientSource;
 use crabrave::handlers::blog::{Note, NoteMode, NotesResponse, RollupNoteGroup};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api;
 
@@ -18,7 +18,8 @@ use crate::api;
 const MAX_NOTES_PAGES: u32 = 10_000;
 
 /// All notes captured for one post, in the API's newest-first order.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PostNotes {
     /// Server-reported total, which can exceed the number archived when
     /// `--notes-limit` truncates the fetch.

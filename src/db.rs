@@ -1,5 +1,6 @@
 //! The `archive.db` SQLite database of archived posts.
 
+pub mod import;
 pub mod rows;
 
 use std::time::Duration;
