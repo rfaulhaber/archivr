@@ -50,6 +50,11 @@
             version = let file = builtins.fromTOML (builtins.readFile ./Cargo.toml); in file.package.version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            # nixpkgs' cargo setup hook sets LIBSQLITE3_SYS_USE_PKG_CONFIG=1,
+            # which overrides rusqlite's "bundled" feature, so the Nix build
+            # links the system SQLite instead of the amalgamation.
+            nativeBuildInputs = [pkgs.pkg-config];
+            buildInputs = [pkgs.sqlite];
           };
           default = self'.packages.${projectName};
         };
