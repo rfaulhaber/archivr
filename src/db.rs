@@ -262,11 +262,18 @@ impl ArchiveDb {
             )
             .optional()?;
         if let Some((source, collection)) = existing {
-            if rec.source == RowSource::JsonImport && source == RowSource::Api.as_str() {
-                return Ok(WriteOutcome::SkippedApiRow);
-            }
-            if rec.collection != Collection::Posts && collection == Collection::Posts.as_str() {
+            let existing_published = collection == Collection::Posts.as_str();
+            let incoming_published = rec.collection == Collection::Posts;
+            if existing_published && !incoming_published {
                 return Ok(WriteOutcome::SkippedPublishedRow);
+            }
+            // The published row wins over another collection's copy, whatever its source.
+            let replaces_other_collection = incoming_published && !existing_published;
+            if !replaces_other_collection
+                && rec.source == RowSource::JsonImport
+                && source == RowSource::Api.as_str()
+            {
+                return Ok(WriteOutcome::SkippedApiRow);
             }
         }
 
@@ -924,6 +931,55 @@ mod tests {
         };
         assert_eq!(collection(1), "posts");
         assert_eq!(collection(2), "posts");
+    }
+
+    #[test]
+    fn precedence_is_independent_of_write_order() {
+        let dir = TempDir::new("archivr-test-db-order-independent");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        let queued = |id: &str| text_post(id, "queued", &[]);
+        let published = |id: &str| text_post(id, "published", &[]);
+
+        // The API's queue row arrives first, then the import's published row.
+        write(&mut db, &queued("1"), Collection::Queue, RowSource::Api);
+        let outcome = write(
+            &mut db,
+            &published("1"),
+            Collection::Posts,
+            RowSource::JsonImport,
+        );
+        assert_eq!(outcome, WriteOutcome::Written);
+
+        // The same two rows in the opposite order.
+        write(
+            &mut db,
+            &published("2"),
+            Collection::Posts,
+            RowSource::JsonImport,
+        );
+        let outcome = write(&mut db, &queued("2"), Collection::Queue, RowSource::Api);
+        assert_eq!(outcome, WriteOutcome::SkippedPublishedRow);
+        db.commit().unwrap();
+
+        let conn = reader(dir.path());
+        for id in [1, 2] {
+            let row: (String, String, String) = conn
+                .query_row(
+                    "SELECT collection, source, body FROM posts WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                row,
+                (
+                    "posts".to_owned(),
+                    "json-import".to_owned(),
+                    "published".to_owned()
+                ),
+                "post {id}"
+            );
+        }
     }
 
     #[test]
