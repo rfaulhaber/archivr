@@ -536,13 +536,14 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         total_archived = run_single_posts(session, &config, &mut sinks).await?;
     } else {
         let outcome = run_backup(session, &config, &mut sinks, &mut job, &job_file).await?;
-        // The `--count` break leaves the loop before the page-end commit, and
-        // the incremental mark must not get ahead of the rows.
-        if let Some(db) = sinks.database.as_deref_mut() {
-            db.commit()?;
-        }
         total_archived = outcome.archived;
-        save_backup_state(&config, &state_file, prior_state.as_ref(), outcome.newest_observed)?;
+        finish_main_window(
+            sinks.database.as_deref_mut(),
+            &config,
+            &state_file,
+            prior_state.as_ref(),
+            outcome.newest_observed,
+        )?;
     }
 
     // Special collections run after the main backup but before the job file
@@ -812,6 +813,22 @@ fn persist_page(
         idx.save(index_path)?;
     }
     Ok(())
+}
+
+/// Ends the main window. The `--count` break leaves the pagination loop before
+/// the page-end commit, and the incremental mark must not get ahead of the
+/// rows, so the commit happens here before the mark is saved.
+fn finish_main_window(
+    database: Option<&mut ArchiveDb>,
+    config: &ResolvedConfig,
+    state_file: &camino::Utf8Path,
+    prior_state: Option<&BackupState>,
+    newest_observed: Option<PostTimestamp>,
+) -> anyhow::Result<()> {
+    if let Some(db) = database {
+        db.commit()?;
+    }
+    save_backup_state(config, state_file, prior_state, newest_observed)
 }
 
 /// The archived file's path relative to the output directory, the form the
@@ -2218,6 +2235,47 @@ mod tests {
 
         assert!(fs_err::exists(&job_file).unwrap());
         assert!(!ArchiveDb::exists(dir.path()));
+    }
+
+    #[test]
+    fn finish_main_window_commits_database_before_saving_state() {
+        let dir = TempDir::new("archivr-test-finish-window-order");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        write_minimal_post(&mut db);
+        // Saving the mark fails because its directory doesn't exist.
+        let state_file = dir.path().join("missing").join(".archivr-state.json");
+
+        let result = finish_main_window(
+            Some(&mut db),
+            &resolved(&[]),
+            &state_file,
+            None,
+            Some(1_700_000_000),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(committed_posts(dir.path()), 1);
+    }
+
+    #[test]
+    fn finish_main_window_commits_rows_and_saves_the_mark() {
+        let dir = TempDir::new("archivr-test-finish-window-all");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        write_minimal_post(&mut db);
+        let state_file = BackupState::state_file_path(dir.path());
+
+        finish_main_window(
+            Some(&mut db),
+            &resolved(&[]),
+            &state_file,
+            None,
+            Some(1_700_000_000),
+        )
+        .unwrap();
+
+        assert_eq!(committed_posts(dir.path()), 1);
+        let state = BackupState::load(&state_file).unwrap();
+        assert_eq!(state.newest_post_timestamp, 1_700_000_000);
     }
 
     fn resolved(extra: &[&str]) -> ResolvedConfig {
