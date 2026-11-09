@@ -86,6 +86,7 @@ archivr blog-one blog-two blog-three --consumer-key KEY --consumer-secret SECRET
 | `--save-avatar`     |       | Also download the blog's avatar into the output directory                          |
 | `--media-list`      |       | Write `media-list.jsonl` mapping each archived post's id to its media URLs         |
 | `--sqlite`          |       | Write `archive.db`, a SQLite database of archived posts, and keep it updated       |
+| `--sqlite-from-json` |      | Build or update `archive.db` from an existing `--json` archive, offline            |
 | `--post-id`         |       | Back up only these posts (comma-separated ids) instead of paginating               |
 | `--id-file`         |       | Back up only the post ids listed in this file (one per line)                       |
 | `--wayback`         |       | Retry dead media URLs (403/404) through the Internet Archive's Wayback Machine     |
@@ -190,7 +191,7 @@ Once `archive.db` exists, every backup into that directory updates it, with or w
 
 The database uses WAL mode with a busy timeout, so you can query it while a backup runs. Each fetched page of posts is committed in one transaction before the job file records the page, so queries see whole pages and the job file never records a page the database lacks.
 
-The database holds only the posts the runs into its directory have archived. When a run creates it but covers only part of the blog (`--incremental`, `--after`, `--before`, `--count`, `--skip`, `--post-id`, `--id-file`, a post filter such as `--include-tags`, `--type`, `--no-reblogs`, or `--only-reblogs`, or a resumed job), archivr prints a notice; run a full backup without those flags to fill it.
+The database holds only the posts the runs into its directory have archived. When a run creates it but covers only part of the blog (`--incremental`, `--after`, `--before`, `--count`, `--skip`, `--post-id`, `--id-file`, a post filter such as `--include-tags`, `--type`, `--no-reblogs`, or `--only-reblogs`, or a resumed job), archivr prints a notice; run a full backup without those flags to fill it, or build it from a `--json` archive with `--sqlite-from-json` (below).
 
 ```sql
 -- full-text search, newest first
@@ -205,6 +206,16 @@ SELECT blog, count(*) FROM trail WHERE is_root GROUP BY blog ORDER BY 2 DESC LIM
 SELECT p.date, p.post_url FROM tags t JOIN posts p ON p.id = t.post_id
 WHERE t.tag = 'art' COLLATE NOCASE;
 ```
+
+#### Building the database from a `--json` archive
+
+`--sqlite-from-json DIR` builds or updates `archive.db` inside an existing `--json` archive from the post files already on disk, without contacting Tumblr, so it needs no blog name and no credentials. It reads the post files at the archive root (flat or with `--directories`) and in the `drafts/`, `queue/`, `submissions/`, and `likes/` subdirectories, and accepts no other option except `--quiet`. It takes the same lock as a backup, so it can't run while one is writing to that directory. It prints progress unless `--quiet`, then a summary; files that couldn't be imported (unreadable, not a post, or a post of another blog) are listed even under `--quiet`.
+
+```sh
+archivr --sqlite-from-json ./my-blog
+```
+
+Imported rows have `source = 'json-import'`, and they are less complete than rows a backup writes: the files hold media URLs already rewritten to local paths, so a downloaded file's media row records its `path` but no original `url`. Rows a backup wrote (`source = 'api'`) are never replaced by imported ones, except that a post's published copy takes over from an API row built from its draft, queue, submission, or like. Re-running the import is safe: it refreshes the rows it wrote earlier and leaves the rest alone, and an interrupted run keeps the batches it already committed. From then on, backups into the directory keep the database updated, as above.
 
 ### Partial backups
 

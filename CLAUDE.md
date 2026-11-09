@@ -43,6 +43,7 @@ All Rust sources live under `src/`:
 - `src/index.rs` - `ArchiveIndex` (`.archivr-index.json` metadata and `index.html` generation)
 - `src/db.rs` - `ArchiveDb` (`archive.db`: schema and version check, `write_post` upserts with the full-text index kept in sync by triggers; rows accumulate in a transaction that `commit` ends, and a page's commit must precede its `job.save`)
 - `src/db/rows.rs` - `build_rows`: turns an archived `Post` into the rows `archive.db` stores (plain-text extraction, trail roots, media variant and path normalization)
+- `src/db/import.rs` - `import_json_archive`: the offline `--sqlite-from-json` build of `archive.db` from a `--json` archive (post-file walker and loader, batched commits, precedence against API rows, failure summary)
 - `src/notes.rs` - Notes fetching with `_links` cursor pagination
 - `src/fsutil.rs` - Atomic writes (temp + rename), mtime stamping, the output-directory lock
 

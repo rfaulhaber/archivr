@@ -265,6 +265,7 @@ mod tests {
             save_avatar: false,
             media_list: false,
             sqlite: false,
+            sqlite_from_json: None,
             post_id: Vec::new(),
             id_file: None,
             wayback: false,

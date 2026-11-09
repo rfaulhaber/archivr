@@ -9,6 +9,7 @@ use archivr::{
     auth::authenticate,
     db::{
         DB_FILE_NAME,
+        import::import_json_archive,
         rows::{Collection, PostRecord, RowSource},
     },
     fsutil::{lock_output_dir, set_mtime, write_atomic},
@@ -55,12 +56,16 @@ async fn main() -> std::process::ExitCode {
 
     // Every file is written atomically and the job cursor is committed only
     // after its batch is on disk, so an immediate exit loses nothing; the
-    // distinct code tells scripts the run was cut short, not finished.
-    tokio::spawn(async {
+    // distinct code tells scripts the run was cut short, not finished. The
+    // import has no job file: it commits in batches and is safe to re-run.
+    let interrupted_message = if args.sqlite_from_json.is_some() {
+        "Interrupted. Re-run the same command to finish the import; batches already committed are kept."
+    } else {
+        "Interrupted. Use --resume to continue from where you left off."
+    };
+    tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = api::say_error(format_args!(
-                "Interrupted. Use --resume to continue from where you left off."
-            ));
+            let _ = api::say_error(format_args!("{interrupted_message}"));
             std::process::exit(EXIT_INTERRUPTED);
         }
     });
@@ -93,7 +98,13 @@ async fn main() -> std::process::ExitCode {
 /// Authenticates once, then backs up each requested blog in turn. A failing
 /// blog doesn't stop the ones after it; the first failure is re-raised at the
 /// end (with a summary when several failed) so the exit code reflects it.
+/// `--sqlite-from-json` instead builds the database from files already on disk,
+/// before any credentials are resolved.
 async fn run(args: Args) -> anyhow::Result<u64> {
+    if let Some(dir) = &args.sqlite_from_json {
+        return run_import(dir, args.quiet);
+    }
+
     let configs = ResolvedConfig::from_args(args)?;
 
     let project_dir = directories::ProjectDirs::from(PROJECT_QUALIFIER, "", PROJECT_NAME)
@@ -143,6 +154,48 @@ async fn run(args: Args) -> anyhow::Result<u64> {
     }
 
     Ok(total_archived)
+}
+
+/// Builds `archive.db` from the `--json` archive in `dir`, returning how many
+/// posts it wrote.
+fn run_import(dir: &camino::Utf8Path, quiet: bool) -> anyhow::Result<u64> {
+    // Held until the import ends, so it can't interleave with a backup into the
+    // same directory.
+    let _lock = lock_output_dir(dir)?;
+    let summary = import_json_archive(dir, quiet)?;
+
+    if !quiet {
+        say!(
+            "Imported {} posts into {}",
+            summary.imported,
+            ArchiveDb::path(dir)
+        )?;
+        if summary.skipped_api > 0 {
+            say!(
+                "  {} already built from the Tumblr API were kept",
+                summary.skipped_api
+            )?;
+        }
+        if summary.skipped_published > 0 {
+            say!(
+                "  {} kept their published version",
+                summary.skipped_published
+            )?;
+        }
+    }
+    if summary.failed > 0 {
+        // Not gated on --quiet: files silently missing from the database would
+        // make every query against it quietly wrong.
+        say!("Warning: {} files could not be imported:", summary.failed)?;
+        for (path, error) in &summary.failures {
+            say!("  {path}: {error}")?;
+        }
+        let shown = u64::try_from(summary.failures.len()).unwrap_or(u64::MAX);
+        if summary.failed > shown {
+            say!("  ...and {} more", summary.failed - shown)?;
+        }
+    }
+    Ok(summary.imported)
 }
 
 /// Backs up one blog into its output directory, returning how many items
@@ -434,7 +487,7 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
                 "Note: {} was just created, but this run covers only part of the blog, so \
                  the database holds only the posts it archives. Run a full backup (without \
                  --incremental, --after, --before, --count, --skip, --post-id or a post \
-                 filter) to fill it.",
+                 filter) to fill it, or run --sqlite-from-json on a --json archive.",
                 ArchiveDb::path(&config.output_dir)
             )?;
         }
@@ -2232,5 +2285,36 @@ mod tests {
         for kind in SpecialKind::ALL {
             assert_eq!(kind.collection().dir_name(), Some(kind.dir_name()));
         }
+    }
+
+    #[test]
+    fn import_reports_the_posts_it_wrote() {
+        let dir = TempDir::new("archivr-test-import-count");
+        fs_err::write(
+            dir.path().join("123.json"),
+            serde_json::to_string(&minimal_post()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(run_import(dir.path(), true).unwrap(), 1);
+        assert_eq!(committed_posts(dir.path()), 1);
+    }
+
+    #[test]
+    fn import_refuses_a_directory_a_backup_holds() {
+        let dir = TempDir::new("archivr-test-import-locked");
+        fs_err::write(
+            dir.path().join("123.json"),
+            serde_json::to_string(&minimal_post()).unwrap(),
+        )
+        .unwrap();
+        let _held = lock_output_dir(dir.path()).unwrap();
+
+        let err = run_import(dir.path(), true).unwrap_err();
+        assert!(
+            err.to_string().contains("another archivr instance"),
+            "{err}"
+        );
+        assert!(!ArchiveDb::exists(dir.path()));
     }
 }
