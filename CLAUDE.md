@@ -30,7 +30,7 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 
 All Rust sources live under `src/`:
 
-- `src/main.rs` - CLI entry point: exit-code mapping, Ctrl-C handling, per-blog orchestration (`backup_blog`), the cursor-pagination loop (`run_backup`), single-post mode, special collections (drafts/queue/submissions/likes), avatar backup
+- `src/main.rs` - CLI entry point: exit-code mapping, Ctrl-C handling, per-blog orchestration (`backup_blog`), the cursor-pagination loop (`run_backup`), single-post mode, special collections (drafts/queue/submissions/likes), avatar backup, the `archive.db` sink (`persist_page` commits the database before the job save, and `finish_main_window` before the incremental mark), `run_import` for `--sqlite-from-json`
 - `src/lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `src/cmd.rs` - CLI argument definitions using clap derive (manual `Debug` impl redacts OAuth credentials)
 - `src/config.rs` - Configuration file deserialization and CLI args resolution into one `ResolvedConfig` per requested blog

@@ -159,8 +159,8 @@ pub struct PostRows {
     pub notes: Vec<NoteRow>,
 }
 
-/// Builds the rows for one post. Fails only when the post id doesn't fit an
-/// `i64`, which `ensure_numeric_id` makes unreachable for API posts.
+/// Builds the rows for one post. Fails when the post id isn't a 64-bit
+/// integer; Tumblr's ids fit.
 pub fn build_rows(rec: &PostRecord<'_>) -> anyhow::Result<PostRows> {
     let post = rec.post;
     let id = post
@@ -421,8 +421,8 @@ fn format_date(timestamp: i64) -> String {
 }
 
 /// The searchable plain text of a block list, one line per contributing piece.
-/// Only fields a reader would see as text contribute; media, layout, and
-/// unrecognized block types do not.
+/// Only text a reader would see, link URLs, and image alt text contribute;
+/// media, layout, and unrecognized block types do not.
 pub fn blocks_text(blocks: &[ContentBlock]) -> String {
     let mut lines: Vec<&str> = Vec::new();
     for block in blocks {

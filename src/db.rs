@@ -64,7 +64,7 @@ CREATE TABLE trail (
     position       INTEGER NOT NULL,       -- trail order as returned (root first)
     blog           TEXT,
     source_post_id TEXT,
-    is_root        INTEGER NOT NULL,       -- is_root_item or the post's root id, else the first item
+    is_root        INTEGER NOT NULL,       -- is_root_item or the post's root id, else the first item when the post names no root
     text           TEXT NOT NULL,
     PRIMARY KEY (post_id, position)
 );
@@ -249,6 +249,9 @@ impl ArchiveDb {
 
     /// Writes the post's rows, replacing everything previously stored for it,
     /// unless a row already there takes precedence.
+    ///
+    /// Any `Err` is fatal for the handle: drop it, because SQLite may already
+    /// have rolled back the open transaction.
     pub fn write_post(&mut self, rec: &PostRecord<'_>) -> anyhow::Result<WriteOutcome> {
         let rows = build_rows(rec)?;
         self.store_rows(rec, &rows)
@@ -304,6 +307,9 @@ impl ArchiveDb {
     }
 
     /// Commits the open transaction, if any.
+    ///
+    /// Any `Err` is fatal for the handle: drop it, because SQLite may already
+    /// have rolled back the open transaction.
     pub fn commit(&mut self) -> anyhow::Result<()> {
         if self.conn.is_autocommit() {
             return Ok(());

@@ -185,9 +185,9 @@ For archives created before this flag existed, run one full (non-incremental) ba
 
 `--sqlite` writes `archive.db` in the output directory, a SQLite database of the posts the backup archives, so you can search and query the archive with `sqlite3` or any SQLite client. It works for HTML and `--json` archives alike, and for the special collections and `--post-id` runs. The database indexes the archived files rather than replacing them: each post's `file_path` points back to its file.
 
-Each post is one row in `posts` (id, collection, date, tags, the post's own URL and its reblog source and root, and the plain text of its content and of its reblog trail), with its tags, reblog trail, media, and (with `--save-notes`) notes in tables of their own. A media row records the original URL and, when the file was downloaded, its path relative to the output directory. The full-text index `posts_fts` covers each post's text, trail text, tags, and the blogs in its trail. Archiving a post again replaces everything stored about it, and posts deleted on Tumblr stay in the database, as their files stay on disk.
+Each post is one row in `posts` (id, collection, date, tags, the post's own URL and its reblog source and root, and the plain text of its content and of its reblog trail), with its tags, reblog trail, media, and (with `--save-notes`) notes in tables of their own. A media row records the original URL and, when the file was downloaded, its path relative to the output directory. The full-text index `posts_fts` covers each post's text, trail text, tags, and the blogs in its trail. Archiving a post again replaces everything stored about it, and posts deleted on Tumblr stay in the database, as their files stay on disk. When neither the API nor the trail names a post's parent blog, `parent_blog` falls back to the blog named in the parent post's URL, which can be a custom domain (`ianbrooks.me`) or a `private_N` placeholder instead of the Tumblr name.
 
-Once `archive.db` exists, every backup into that directory updates it, with or without the flag, so a scheduled run, a `--post-id` fix, or a resumed job can't leave it behind. Delete the file to turn this off. A database belongs to one blog: backing up a different blog into the same directory is an error.
+Once `archive.db` exists, every backup into that directory updates it, with or without the flag, so a scheduled run, a `--post-id` fix, or a resumed job can't leave it behind. Delete the file to turn this off. A database belongs to one blog: backing up a different blog into the same directory is an error. A backup stores and compares the blog name you give on the command line, while `--sqlite-from-json` stores the name Tumblr reports, so name the blog by its Tumblr name (`example`, not its custom domain `example.com`) whenever you use the database; case and a `.tumblr.com` suffix don't matter, but a custom domain doesn't match the name Tumblr reports, so mixing the two fails with a blog mismatch.
 
 The database uses WAL mode with a busy timeout, so you can query it while a backup runs. Each fetched page of posts is committed in one transaction before the job file records the page, so queries see whole pages and the job file never records a page the database lacks.
 
@@ -197,7 +197,8 @@ The database holds only the posts the runs into its directory have archived. Whe
 -- full-text search, newest first
 SELECT p.date, p.post_url, snippet(posts_fts, -1, '[', ']', '…', 12)
 FROM posts_fts JOIN posts p ON p.id = posts_fts.rowid
-WHERE posts_fts MATCH 'heavy thing' ORDER BY p.timestamp DESC LIMIT 20;
+WHERE posts_fts MATCH 'heavy thing' AND p.collection = 'posts'
+ORDER BY p.timestamp DESC LIMIT 20;
 
 -- most-reblogged-from blogs
 SELECT blog, count(*) FROM trail WHERE is_root GROUP BY blog ORDER BY 2 DESC LIMIT 20;
@@ -209,7 +210,7 @@ WHERE t.tag = 'art' COLLATE NOCASE;
 
 #### Building the database from a `--json` archive
 
-`--sqlite-from-json DIR` builds or updates `archive.db` inside an existing `--json` archive from the post files already on disk, without contacting Tumblr, so it needs no blog name and no credentials. It reads the post files at the archive root (flat or with `--directories`) and in the `drafts/`, `queue/`, `submissions/`, and `likes/` subdirectories, and accepts no other option except `--quiet`. It takes the same lock as a backup, so it can't run while one is writing to that directory. It prints progress unless `--quiet`, then a summary; files that couldn't be imported (unreadable, not a post, or a post of another blog) are listed even under `--quiet`.
+`--sqlite-from-json DIR` builds or updates `archive.db` inside an existing `--json` archive from the post files already on disk, without contacting Tumblr, so it needs no blog name and no credentials. It reads the post files at the archive root (flat or with `--directories`) and in the `drafts/`, `queue/`, `submissions/`, and `likes/` subdirectories, and accepts no other option except `--quiet`, apart from `--consumer-key` and `--consumer-secret` (and their `ARCHIVR_CONSUMER_KEY` and `ARCHIVR_CONSUMER_SECRET` environment variables), which it accepts and ignores. It takes the same lock as a backup, so it can't run while one is writing to that directory. It prints progress and an `Imported N posts` summary unless `--quiet`; files that couldn't be imported (unreadable, not a post, a post of another blog, or a post whose id isn't a number) are listed even under `--quiet`.
 
 ```sh
 archivr --sqlite-from-json ./my-blog
