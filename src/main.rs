@@ -433,7 +433,8 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
             say!(
                 "Note: {} was just created, but this run covers only part of the blog, so \
                  the database holds only the posts it archives. Run a full backup (without \
-                 --incremental, --after, --before, --count, --skip or --post-id) to fill it.",
+                 --incremental, --after, --before, --count, --skip, --post-id or a post \
+                 filter) to fill it.",
                 ArchiveDb::path(&config.output_dir)
             )?;
         }
@@ -516,10 +517,15 @@ async fn backup_blog(session: &Session, mut config: ResolvedConfig) -> anyhow::R
         }
     }
 
+    // The backup is finished by now, so a failed count only costs this line,
+    // not the run's job-file cleanup and exit code.
     if !config.quiet
         && let Some(db) = database.as_ref()
     {
-        say!("Updated {DB_FILE_NAME} ({} posts)", db.post_count()?)?;
+        match db.post_count() {
+            Ok(count) => say!("Updated {DB_FILE_NAME} ({count} posts)")?,
+            Err(e) => log::warn!("not reporting the {DB_FILE_NAME} post count: {e:#}"),
+        }
     }
 
     // Single-post mode never ran the main window, so a job file found here
@@ -724,6 +730,10 @@ fn database_coverage_is_partial(config: &ResolvedConfig, resuming: bool) -> bool
         || config.count.is_some()
         || config.skip.is_some()
         || !config.post_ids.is_empty()
+        || !config.include_tags.is_empty()
+        || config.post_type.is_some()
+        || config.no_reblogs
+        || config.only_reblogs
         || resuming
 }
 
@@ -752,12 +762,16 @@ fn persist_page(
 }
 
 /// The archived file's path relative to the output directory, the form the
-/// database stores.
-fn archive_relative_path(output_dir: &camino::Utf8Path, file: &camino::Utf8Path) -> String {
-    file.strip_prefix(output_dir)
-        .unwrap_or(file)
-        .as_str()
-        .to_owned()
+/// database stores. A file outside the directory is an error rather than a
+/// stored absolute path, which would break the archive if it were moved.
+fn archive_relative_path(
+    output_dir: &camino::Utf8Path,
+    file: &camino::Utf8Path,
+) -> anyhow::Result<String> {
+    let relative = file
+        .strip_prefix(output_dir)
+        .with_context(|| format!("{file} is not inside the output directory {output_dir}"))?;
+    Ok(relative.as_str().to_owned())
 }
 
 async fn run_backup(
@@ -991,7 +1005,7 @@ async fn run_backup(
                     write_atomic(&output_file, content.as_bytes())?;
                     stamp_mtime(&output_file, post.timestamp);
                     log::debug!("saved post {} to {}", post.id, output_file);
-                    archive_relative_path(&config.output_dir, &output_file)
+                    archive_relative_path(&config.output_dir, &output_file)?
                 } else {
                     // HTML mode: buffer for nav link injection
                     let r = sinks.renderer
@@ -1014,7 +1028,7 @@ async fn run_backup(
                     };
 
                     let current_href = post_relative_href(&post.id, config.directories);
-                    let file_path = archive_relative_path(&config.output_dir, &output_file);
+                    let file_path = archive_relative_path(&config.output_dir, &output_file)?;
 
                     // Persist this post before the batch's offset can be saved past
                     // it: the placeholder is an HTML comment, so the on-disk copy
@@ -1248,7 +1262,7 @@ async fn run_single_posts(
                 post: original,
                 notes: post_notes.as_ref(),
                 collection: Collection::Posts,
-                file_path: Some(&archive_relative_path(&config.output_dir, &output_file)),
+                file_path: Some(&archive_relative_path(&config.output_dir, &output_file)?),
                 url_map: &url_map,
                 source: RowSource::Api,
             })?;
@@ -1639,7 +1653,7 @@ async fn backup_special(
                     post: original,
                     notes: None,
                     collection: kind.collection(),
-                    file_path: Some(&archive_relative_path(&config.output_dir, &output_file)),
+                    file_path: Some(&archive_relative_path(&config.output_dir, &output_file)?),
                     url_map: &url_map,
                     source: RowSource::Api,
                 })?;
@@ -2170,15 +2184,20 @@ mod tests {
     #[test]
     fn database_coverage_is_partial_cases() {
         assert!(!database_coverage_is_partial(&resolved(&[]), false));
-        for flags in [
-            ["--after", "2024-01-01"],
-            ["--before", "2024-01-01"],
-            ["--count", "5"],
-            ["--skip", "5"],
-            ["--post-id", "1"],
-        ] {
+        let partial: &[&[&str]] = &[
+            &["--after", "2024-01-01"],
+            &["--before", "2024-01-01"],
+            &["--count", "5"],
+            &["--skip", "5"],
+            &["--post-id", "1"],
+            &["--include-tags", "art"],
+            &["--type", "video"],
+            &["--no-reblogs"],
+            &["--only-reblogs"],
+        ];
+        for flags in partial {
             assert!(
-                database_coverage_is_partial(&resolved(&flags), false),
+                database_coverage_is_partial(&resolved(flags), false),
                 "{flags:?}"
             );
         }
@@ -2190,14 +2209,22 @@ mod tests {
         for out in ["/archive/blog", "blog"] {
             let out = camino::Utf8Path::new(out);
             assert_eq!(
-                archive_relative_path(out, &out.join("123.json")),
+                archive_relative_path(out, &out.join("123.json")).unwrap(),
                 "123.json"
             );
             assert_eq!(
-                archive_relative_path(out, &out.join("drafts").join("123").join("index.html")),
+                archive_relative_path(out, &out.join("drafts").join("123").join("index.html"))
+                    .unwrap(),
                 "drafts/123/index.html"
             );
         }
+    }
+
+    #[test]
+    fn archive_relative_path_rejects_a_file_outside_the_output_directory() {
+        let out = camino::Utf8Path::new("/archive/blog");
+        let outside = camino::Utf8Path::new("/elsewhere/123.json");
+        assert!(archive_relative_path(out, outside).is_err());
     }
 
     #[test]

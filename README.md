@@ -190,7 +190,7 @@ Once `archive.db` exists, every backup into that directory updates it, with or w
 
 The database uses WAL mode with a busy timeout, so you can query it while a backup runs. Each fetched page of posts is committed in one transaction before the job file records the page, so queries see whole pages and the job file never records a page the database lacks.
 
-The database holds only the posts the runs into its directory have archived. When a run creates it but covers only part of the blog (`--incremental`, `--after`, `--before`, `--count`, `--skip`, `--post-id`, `--id-file`, or a resumed job), archivr prints a notice; run a full backup without those flags to fill it.
+The database holds only the posts the runs into its directory have archived. When a run creates it but covers only part of the blog (`--incremental`, `--after`, `--before`, `--count`, `--skip`, `--post-id`, `--id-file`, a post filter such as `--include-tags`, `--type`, `--no-reblogs`, or `--only-reblogs`, or a resumed job), archivr prints a notice; run a full backup without those flags to fill it.
 
 ```sql
 -- full-text search, newest first

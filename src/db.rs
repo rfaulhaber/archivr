@@ -178,6 +178,7 @@ pub enum WriteOutcome {
 #[derive(Debug)]
 pub struct ArchiveDb {
     conn: Connection,
+    path: Utf8PathBuf,
     created: bool,
 }
 
@@ -206,13 +207,17 @@ impl ArchiveDb {
     /// directory has none yet.
     pub fn open(dir: &Utf8Path, blog_name: &str) -> anyhow::Result<Self> {
         let path = Self::path(dir);
-        let mut conn = Connection::open(&path).with_context(|| format!("failed to open {path}"))?;
+        Self::open_at(path.clone(), blog_name).with_context(|| error_context(&path))
+    }
+
+    fn open_at(path: Utf8PathBuf, blog_name: &str) -> anyhow::Result<Self> {
+        let mut conn = Connection::open(&path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
 
-        let version = user_version(&conn).with_context(|| format!("failed to read {path}"))?;
+        let version = user_version(&conn)?;
         if version > SCHEMA_VERSION {
             bail!(
-                "{path} was written by a newer archivr (schema version {version}, \
+                "was written by a newer archivr (schema version {version}, \
                  this build supports up to {SCHEMA_VERSION})"
             );
         }
@@ -222,16 +227,18 @@ impl ArchiveDb {
 
         let created = version == 0;
         if created {
-            create_schema(&mut conn, blog_name)
-                .with_context(|| format!("failed to create the schema in {path}"))?;
+            create_schema(&mut conn, blog_name).context("failed to create the schema")?;
         } else {
-            let stored = read_blog_name(&conn)?
-                .with_context(|| format!("{path} has no blog_name recorded"))?;
+            let stored = read_blog_name(&conn)?.context("has no blog_name recorded")?;
             if !blog_names_match(&stored, blog_name) {
-                bail!("database at {path} is for blog `{stored}`, but `{blog_name}` was requested");
+                bail!("is for blog `{stored}`, but `{blog_name}` was requested");
             }
         }
-        Ok(Self { conn, created })
+        Ok(Self {
+            conn,
+            path,
+            created,
+        })
     }
 
     /// Whether this `open` created the schema, as opposed to finding one.
@@ -243,6 +250,15 @@ impl ArchiveDb {
     /// unless a row already there takes precedence.
     pub fn write_post(&mut self, rec: &PostRecord<'_>) -> anyhow::Result<WriteOutcome> {
         let rows = build_rows(rec)?;
+        self.store_rows(rec, &rows)
+            .with_context(|| error_context(&self.path))
+    }
+
+    fn store_rows(
+        &mut self,
+        rec: &PostRecord<'_>,
+        rows: &PostRows,
+    ) -> anyhow::Result<WriteOutcome> {
         let id = rows.post.id;
 
         if self.conn.is_autocommit() {
@@ -281,7 +297,7 @@ impl ArchiveDb {
         // leave half a post in the page's transaction.
         let sp = self.conn.savepoint()?;
         upsert_post(&sp, &rows.post)?;
-        replace_child_rows(&sp, id, &rows)?;
+        replace_child_rows(&sp, id, rows)?;
         sp.commit()?;
         Ok(WriteOutcome::Written)
     }
@@ -291,6 +307,11 @@ impl ArchiveDb {
         if self.conn.is_autocommit() {
             return Ok(());
         }
+        self.commit_transaction()
+            .with_context(|| error_context(&self.path))
+    }
+
+    fn commit_transaction(&mut self) -> anyhow::Result<()> {
         self.conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'updated_at'",
             [now_rfc3339()],
@@ -302,9 +323,16 @@ impl ArchiveDb {
     pub fn post_count(&self) -> anyhow::Result<u64> {
         let count: i64 = self
             .conn
-            .query_row("SELECT count(*) FROM posts", [], |row| row.get(0))?;
+            .query_row("SELECT count(*) FROM posts", [], |row| row.get(0))
+            .with_context(|| error_context(&self.path))?;
         Ok(u64::try_from(count)?)
     }
+}
+
+/// Prefixes every error [`ArchiveDb`] reports: SQLite's own messages
+/// ("database is locked") don't say which file they are about.
+fn error_context(path: &Utf8Path) -> String {
+    format!("{DB_FILE_NAME} at {path}")
 }
 
 /// Inserts the `posts` row, or overwrites every column of the existing one.
@@ -592,14 +620,42 @@ mod tests {
             .unwrap();
 
         let err = ArchiveDb::open(dir.path(), "test").unwrap_err();
-        assert!(err.to_string().contains("newer archivr"), "{err}");
+        assert!(format!("{err:#}").contains("newer archivr"), "{err:#}");
     }
 
     #[test]
     fn blog_name_mismatch_is_rejected() {
         let dir = TempDir::new("archivr-test-db-mismatch");
         ArchiveDb::open(dir.path(), "a").unwrap();
-        assert!(ArchiveDb::open(dir.path(), "b").is_err());
+        let err = ArchiveDb::open(dir.path(), "b").unwrap_err();
+        assert!(format!("{err:#}").contains("is for blog `a`"), "{err:#}");
+    }
+
+    #[test]
+    fn errors_name_the_database_file() {
+        let dir = TempDir::new("archivr-test-db-error-context");
+        let mut db = ArchiveDb::open(dir.path(), "test").unwrap();
+        // Another connection holds the write lock; with no busy timeout the
+        // write fails at once instead of waiting out the real one.
+        db.conn.busy_timeout(Duration::ZERO).unwrap();
+        let holder = reader(dir.path());
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let err = db
+            .write_post(&PostRecord {
+                post: &text_post("1", "alpha", &[]),
+                notes: None,
+                collection: Collection::Posts,
+                file_path: None,
+                url_map: &HashMap::new(),
+                source: RowSource::Api,
+            })
+            .unwrap_err();
+
+        let message = format!("{err:#}");
+        let named = format!("archive.db at {}", ArchiveDb::path(dir.path()));
+        assert!(message.contains(&named), "{message}");
+        assert!(message.contains("locked"), "{message}");
     }
 
     #[test]
