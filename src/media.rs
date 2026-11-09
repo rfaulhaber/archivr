@@ -50,19 +50,22 @@ pub fn collect_image_urls(post: &Post) -> Vec<String> {
     urls
 }
 
+/// The image variant archivr downloads: the original-dimensions one, else the
+/// first available.
+pub(crate) fn best_image_variant(media: &[MediaObject]) -> Option<&MediaObject> {
+    media
+        .iter()
+        .find(|m| matches!(m.has_original_dimensions, Some(true)))
+        .or_else(|| media.first())
+}
+
 fn collect_from_blocks(blocks: &[ContentBlock], urls: &mut Vec<String>) {
     for block in blocks {
-        if let ContentBlock::Image { media, .. } = block {
-            // Prefer the original-dimensions image, fall back to the first available
-            let best = media
-                .iter()
-                .find(|m| matches!(m.has_original_dimensions, Some(true)))
-                .or_else(|| media.first());
-            if let Some(m) = best
-                && !m.url.is_empty()
-            {
-                urls.push(m.url.clone());
-            }
+        if let ContentBlock::Image { media, .. } = block
+            && let Some(m) = best_image_variant(media)
+            && !m.url.is_empty()
+        {
+            urls.push(m.url.clone());
         }
     }
 }

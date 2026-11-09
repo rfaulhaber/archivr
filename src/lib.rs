@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod cmd;
 pub mod config;
+pub mod db;
 pub mod fsutil;
 pub mod index;
 pub mod job;
@@ -9,9 +10,12 @@ pub mod media;
 pub mod notes;
 pub mod state;
 pub mod template;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use cmd::Args;
 pub use config::{Config, ResolvedConfig};
+pub use db::ArchiveDb;
 pub use index::ArchiveIndex;
 pub use job::JobState;
 pub use notes::PostNotes;

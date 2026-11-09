@@ -30,7 +30,7 @@ The devshell provides: rust toolchain, clippy, rust-analyzer, cargo-nextest.
 
 All Rust sources live under `src/`:
 
-- `src/main.rs` - CLI entry point: exit-code mapping, Ctrl-C handling, per-blog orchestration (`backup_blog`), the cursor-pagination loop (`run_backup`), single-post mode, special collections (drafts/queue/submissions/likes), avatar backup
+- `src/main.rs` - CLI entry point: exit-code mapping, Ctrl-C handling, per-blog orchestration (`backup_blog`), the cursor-pagination loop (`run_backup`), single-post mode, special collections (drafts/queue/submissions/likes), avatar backup, the `archive.db` sink (`persist_page` commits the database before the job save, and `finish_main_window` before the incremental mark), `run_import` for `--sqlite-from-json`
 - `src/lib.rs` - Core library: error types, OAuth callback server, re-exports
 - `src/cmd.rs` - CLI argument definitions using clap derive (manual `Debug` impl redacts OAuth credentials)
 - `src/config.rs` - Configuration file deserialization and CLI args resolution into one `ResolvedConfig` per requested blog
@@ -41,6 +41,9 @@ All Rust sources live under `src/`:
 - `src/media.rs` - Media collection/download/URL-rewriting into the shared `media/{images,videos,audio}/` stores, Wayback Machine fallback, the yt-dlp bridge for external embeds, `media-list.jsonl` writer
 - `src/template.rs` - minijinja rendering: default template, NPF block rendering, HTML escaping/URL sanitizing, `--no-embeds` stripping
 - `src/index.rs` - `ArchiveIndex` (`.archivr-index.json` metadata and `index.html` generation)
+- `src/db.rs` - `ArchiveDb` (`archive.db`: schema and version check, `write_post` upserts with the full-text index kept in sync by triggers; rows accumulate in a transaction that `commit` ends, and a page's commit must precede its `job.save`)
+- `src/db/rows.rs` - `build_rows`: turns an archived `Post` into the rows `archive.db` stores (plain-text extraction, trail roots, media variant and path normalization)
+- `src/db/import.rs` - `import_json_archive`: the offline `--sqlite-from-json` build of `archive.db` from a `--json` archive (post-file walker and loader, batched commits, precedence against API rows, failure summary)
 - `src/notes.rs` - Notes fetching with `_links` cursor pagination
 - `src/fsutil.rs` - Atomic writes (temp + rename), mtime stamping, the output-directory lock
 

@@ -25,6 +25,51 @@ const POST_TYPES: [&str; 8] = [
     "text", "photo", "quote", "link", "chat", "audio", "video", "answer",
 ];
 
+/// Every argument id except `sqlite_from_json` and `quiet`: the flags that
+/// configure a backup, none of which mean anything to the offline import.
+/// `--quiet` stays allowed because the import has progress output to suppress.
+/// The credentials are left out too: the environment can supply them, and clap counts that as present.
+const BACKUP_ARG_IDS: &[&str] = &[
+    "blog_names",
+    "config_file",
+    "resume",
+    "incremental",
+    "template",
+    "directories",
+    "save_images",
+    "json",
+    "save_notes",
+    "notes_limit",
+    "drafts",
+    "queue",
+    "submissions",
+    "likes",
+    "include_tags",
+    "post_type",
+    "no_reblogs",
+    "only_reblogs",
+    "save_video",
+    "save_audio",
+    "save_video_external",
+    "index_file",
+    "count",
+    "skip",
+    "save_avatar",
+    "media_list",
+    "sqlite",
+    "post_id",
+    "id_file",
+    "wayback",
+    "no_embeds",
+    "output_dir",
+    "before",
+    "after",
+    "reauth",
+    "cookies_file",
+    "dashboard",
+    "headless",
+];
+
 #[derive(Parser)]
 #[command(name = "archivr", bin_name = "archivr", version, about = "A Tumblr backup tool", long_about = None)]
 pub struct Args {
@@ -32,7 +77,7 @@ pub struct Args {
         help = "Names of the Tumblr blogs to back up (each goes to its own output directory)",
         value_parser = non_empty_string,
         num_args = 1..,
-        required = true
+        required_unless_present = "sqlite_from_json"
     )]
     pub blog_names: Vec<String>,
 
@@ -214,6 +259,20 @@ pub struct Args {
 
     #[arg(
         long,
+        help = "Write archive.db, a SQLite database of archived posts; once it exists, every backup into the directory keeps it updated"
+    )]
+    pub sqlite: bool,
+
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with_all = BACKUP_ARG_IDS,
+        help = "Build or update archive.db inside an existing --json archive from its files, without contacting Tumblr"
+    )]
+    pub sqlite_from_json: Option<Utf8PathBuf>,
+
+    #[arg(
+        long,
         value_name = "IDS",
         value_delimiter = ',',
         value_parser = non_empty_string,
@@ -331,6 +390,8 @@ impl std::fmt::Debug for Args {
             .field("skip", &self.skip)
             .field("save_avatar", &self.save_avatar)
             .field("media_list", &self.media_list)
+            .field("sqlite", &self.sqlite)
+            .field("sqlite_from_json", &self.sqlite_from_json)
             .field("post_id", &self.post_id)
             .field("id_file", &self.id_file)
             .field("wayback", &self.wayback)
@@ -553,6 +614,81 @@ mod tests {
         assert!(args.media_list);
         assert!(args.wayback);
         assert!(args.no_embeds);
+    }
+
+    #[test]
+    fn sqlite_flag_parses() {
+        assert!(!Args::parse_from(["archivr", "blog"]).sqlite);
+        assert!(Args::parse_from(["archivr", "blog", "--sqlite"]).sqlite);
+    }
+
+    #[test]
+    fn sqlite_from_json_needs_no_blog_name() {
+        let args = Args::try_parse_from(["archivr", "--sqlite-from-json", "dir"]).unwrap();
+        assert_eq!(args.sqlite_from_json, Some(Utf8PathBuf::from("dir")));
+        assert!(args.blog_names.is_empty());
+    }
+
+    #[test]
+    fn sqlite_from_json_conflicts_with_backup_flags() {
+        assert!(Args::try_parse_from(["archivr", "blog", "--sqlite-from-json", "dir"]).is_err());
+        assert!(Args::try_parse_from(["archivr", "--sqlite-from-json", "dir", "--json"]).is_err());
+        let args =
+            Args::try_parse_from(["archivr", "--sqlite-from-json", "dir", "--quiet"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn sqlite_from_json_accepts_credentials() {
+        // The import never authenticates, but the credentials may be set in the
+        // environment, which clap counts as present, so they can't conflict.
+        assert!(
+            Args::try_parse_from([
+                "archivr",
+                "--sqlite-from-json",
+                "dir",
+                "--consumer-key",
+                "k",
+                "--consumer-secret",
+                "s",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn backup_arg_ids_cover_every_other_argument() {
+        use clap::CommandFactory as _;
+        let command = Args::command();
+        let ids: Vec<&str> = command
+            .get_arguments()
+            .map(|a| a.get_id().as_str())
+            .collect();
+        for id in &ids {
+            // The credentials can come from the environment, so the import
+            // must accept them (and ignore them).
+            if matches!(
+                *id,
+                "help"
+                    | "version"
+                    | "sqlite_from_json"
+                    | "quiet"
+                    | "consumer_key"
+                    | "consumer_secret"
+            ) {
+                continue;
+            }
+            assert!(
+                BACKUP_ARG_IDS.contains(id),
+                "`{id}` is missing from BACKUP_ARG_IDS"
+            );
+        }
+        for id in BACKUP_ARG_IDS {
+            assert!(
+                ids.contains(id),
+                "BACKUP_ARG_IDS lists `{id}`, which is not an argument"
+            );
+        }
     }
 
     #[test]
